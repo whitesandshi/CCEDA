@@ -8,6 +8,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -17,6 +18,7 @@ namespace
 {
 using cceda::application::ExperimentalMeshingJobResult;
 using cceda::application::MeshingJobController;
+using cceda::application::MeshingJobCancellation;
 using cceda::application::MeshingJobFailure;
 using cceda::application::MeshingJobFailureKind;
 using cceda::application::MeshingJobProgress;
@@ -71,10 +73,19 @@ bool successfulJobProducesVerifiedExperimentalResult(
 
   std::optional<ExperimentalMeshingJobResult> result;
   std::optional<MeshingJobFailure> failure;
+  bool lateCancellationRejected = false;
   QObject::connect(&controller, &MeshingJobController::experimentalSucceeded,
     &controller, [&](const ExperimentalMeshingJobResult& value) { result = value; });
   QObject::connect(&controller, &MeshingJobController::failed,
     &controller, [&](const MeshingJobFailure& value) { failure = value; });
+  QObject::connect(&controller, &MeshingJobController::progressChanged,
+    &controller, [&](const MeshingJobProgress& progress) {
+      if (progress.stage == "completed")
+      {
+        lateCancellationRejected =
+          controller.cancel("too late", 1'000).has_value();
+      }
+    });
 
   const auto rejection = controller.submit({"success-job", step, 0.0, 0.0});
   if (!require(!rejection.has_value(), "valid job should be accepted")
@@ -101,6 +112,8 @@ bool successfulJobProducesVerifiedExperimentalResult(
     && require(result->meshSha256.size() == 64, "result should expose the verified digest")
     && require(result->nodeCount > 0 && result->triangleCount > 0
       && result->tetrahedronCount > 0, "result should expose non-zero mesh counts")
+    && require(lateCancellationRejected,
+      "cancellation after completed progress should be rejected")
     && require(!controller.isRunning(), "controller should return to idle after success");
 }
 
@@ -214,6 +227,106 @@ bool modifiedWorkerOutputIsRejected(
       "modified output should use the protocol error code");
 }
 
+bool cancelledJobDoesNotPublishOrMutateProject(
+  const QString& worker,
+  const QString& step)
+{
+  QTemporaryDir jobs;
+  cceda::domain::ProjectState project;
+  project.commitImportedGeometry();
+  const auto revision = project.geometryRevision();
+  MeshingJobController controller(
+    project,
+    configuration(worker, QCoreApplication::applicationFilePath(), jobs.path()));
+
+  bool cancelAccepted = false;
+  bool succeeded = false;
+  std::optional<MeshingJobFailure> failure;
+  std::optional<MeshingJobCancellation> cancelling;
+  std::optional<MeshingJobCancellation> cancelled;
+  QObject::connect(&controller, &MeshingJobController::progressChanged,
+    &controller, [&](const MeshingJobProgress& progress) {
+      if (!cancelAccepted && progress.stage == "generating-volume")
+      {
+        cancelAccepted = !controller.cancel("user requested", 2'000).has_value();
+      }
+    });
+  QObject::connect(&controller, &MeshingJobController::cancelling,
+    &controller, [&](const MeshingJobCancellation& value) { cancelling = value; });
+  QObject::connect(&controller, &MeshingJobController::cancelled,
+    &controller, [&](const MeshingJobCancellation& value) { cancelled = value; });
+  QObject::connect(&controller, &MeshingJobController::experimentalSucceeded,
+    &controller, [&](const ExperimentalMeshingJobResult&) { succeeded = true; });
+  QObject::connect(&controller, &MeshingJobController::failed,
+    &controller, [&](const MeshingJobFailure& value) { failure = value; });
+
+  const auto rejection = controller.submit({"cancel-job", step, 0.0, 0.0});
+  return require(!rejection.has_value(), "cancel test job should be accepted")
+    && require(waitUntil([&] {
+      return succeeded || failure.has_value() || cancelled.has_value();
+    }), "cancel test job should reach a terminal state")
+    && require(cancelAccepted, "active controller cancellation should be accepted")
+    && require(cancelling.has_value(), "controller should publish Cancelling")
+    && require(cancelled.has_value(), "controller should publish Cancelled")
+    && require(!cancelled->forced, "responsive Worker cancellation should be cooperative")
+    && require(cancelled->reason == "user requested",
+      "controller cancellation reason should round-trip")
+    && require(cancelled->sourceGeometryRevision == revision,
+      "controller cancellation should retain the submitted revision")
+    && require(!succeeded, "cancelled controller job must not publish success")
+    && require(!failure.has_value(), "cancelled controller job must not publish failure")
+    && require(project.currentMesh() == nullptr,
+      "cancelled job must not create a current mesh")
+    && require(project.geometryRevision() == revision,
+      "cancelled job must not change geometry")
+    && require(!QFileInfo(QDir(jobs.path()).filePath(
+      "cancel-job/output/gmsh-intermediate.msh")).exists(),
+      "cancelled controller job retained formal mesh output")
+    && require(!controller.isRunning(), "controller should be idle after cancellation")
+    && require(!controller.isCancelling(),
+      "controller should leave Cancelling after its terminal state");
+}
+
+bool preparationCanBeCancelledBeforeWorkerLaunch(
+  const QString& worker,
+  const QString& backend,
+  const QString& step)
+{
+  QTemporaryDir jobs;
+  cceda::domain::ProjectState project;
+  project.commitImportedGeometry();
+  MeshingJobController controller(project, configuration(worker, backend, jobs.path()));
+
+  bool succeeded = false;
+  std::optional<MeshingJobFailure> failure;
+  std::optional<MeshingJobCancellation> cancelled;
+  QObject::connect(&controller, &MeshingJobController::experimentalSucceeded,
+    &controller, [&](const ExperimentalMeshingJobResult&) { succeeded = true; });
+  QObject::connect(&controller, &MeshingJobController::failed,
+    &controller, [&](const MeshingJobFailure& value) { failure = value; });
+  QObject::connect(&controller, &MeshingJobController::cancelled,
+    &controller, [&](const MeshingJobCancellation& value) { cancelled = value; });
+
+  const auto rejection = controller.submit({"prepare-cancel", step, 0.0, 0.0});
+  const auto cancelRejection = controller.cancel("cancel before launch", 1'000);
+  return require(!rejection.has_value(), "preparation-cancel job should be accepted")
+    && require(!cancelRejection.has_value(),
+      "cancellation during preparation should be accepted")
+    && require(waitUntil([&] {
+      return succeeded || failure.has_value() || cancelled.has_value();
+    }), "preparation cancellation should reach a terminal state")
+    && require(cancelled.has_value(), "preparation cancellation should publish Cancelled")
+    && require(cancelled->stage == "initializing",
+      "preparation cancellation should report the initializing stage")
+    && require(!succeeded, "preparation cancellation must not publish success")
+    && require(!failure.has_value(), "preparation cancellation must not publish failure")
+    && require(!QFileInfo(QDir(jobs.path()).filePath(
+      "prepare-cancel/output/gmsh-intermediate.msh")).exists(),
+      "preparation cancellation should not launch the Worker")
+    && require(!controller.isRunning(),
+      "controller should be idle after preparation cancellation");
+}
+
 bool invalidSubmissionIsRejectedBeforeWorkStarts(
   const QString& worker,
   const QString& backend,
@@ -224,8 +337,13 @@ bool invalidSubmissionIsRejectedBeforeWorkStarts(
   project.commitImportedGeometry();
   MeshingJobController controller(project, configuration(worker, backend, jobs.path()));
 
+  const auto idleCancellation = controller.cancel("nothing active", 1'000);
   const auto rejection = controller.submit({"../escape", step, 0.0, 0.0});
-  return require(rejection.has_value(), "unsafe job ID should be rejected")
+  return require(idleCancellation.has_value(),
+      "idle controller cancellation should be rejected")
+    && require(idleCancellation->kind == MeshingJobFailureKind::InvalidRequest,
+      "idle cancellation should have invalid-request kind")
+    && require(rejection.has_value(), "unsafe job ID should be rejected")
     && require(rejection->kind == MeshingJobFailureKind::InvalidRequest,
       "unsafe job ID should have invalid-request kind")
     && require(!controller.isRunning(), "rejected job should not start work")
@@ -237,6 +355,18 @@ bool invalidSubmissionIsRejectedBeforeWorkStarts(
 int main(int argc, char* argv[])
 {
   QCoreApplication application(argc, argv);
+  if (argc == 2
+    && (QString::fromLocal8Bit(argv[1]) == "-version"
+      || QString::fromLocal8Bit(argv[1]) == "--version"))
+  {
+    std::fputs("4.13.1\n", stdout);
+    return 0;
+  }
+  if (application.arguments().contains("-3"))
+  {
+    QThread::msleep(10'000);
+    return 1;
+  }
   if (argc != 4)
   {
     std::cerr << "Usage: MeshingJobControllerTests <worker> <gmsh> <step>\n";
@@ -250,6 +380,8 @@ int main(int argc, char* argv[])
     && concurrentSubmissionIsRejected(worker, backend, step)
     && geometryChangeMakesInFlightResultStale(worker, backend, step)
     && modifiedWorkerOutputIsRejected(worker, backend, step)
+    && cancelledJobDoesNotPublishOrMutateProject(worker, step)
+    && preparationCanBeCancelledBeforeWorkerLaunch(worker, backend, step)
     && invalidSubmissionIsRejectedBeforeWorkStarts(worker, backend, step);
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

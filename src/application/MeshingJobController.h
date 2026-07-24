@@ -49,6 +49,15 @@ struct ExperimentalMeshingJobResult
   std::uint64_t tetrahedronCount = 0;
 };
 
+struct MeshingJobCancellation
+{
+  QString jobId;
+  domain::GeometryRevision sourceGeometryRevision = 0;
+  QString reason;
+  QString stage;
+  bool forced = false;
+};
+
 enum class MeshingJobFailureKind
 {
   InvalidRequest,
@@ -85,12 +94,21 @@ public:
 
   [[nodiscard]] std::optional<MeshingJobFailure> submit(
     const MeshingJobSubmission& submission);
+  // deadlineMilliseconds bounds the wait for Worker cooperation (1..60000).
+  [[nodiscard]] std::optional<MeshingJobFailure> cancel(
+    const QString& reason,
+    int deadlineMilliseconds);
   [[nodiscard]] bool isRunning() const noexcept;
+  [[nodiscard]] bool isCancelling() const noexcept;
 
 signals:
   void progressChanged(const cceda::application::MeshingJobProgress& progress);
   void experimentalSucceeded(
     const cceda::application::ExperimentalMeshingJobResult& result);
+  void cancelling(
+    const cceda::application::MeshingJobCancellation& cancellation);
+  void cancelled(
+    const cceda::application::MeshingJobCancellation& cancellation);
   void failed(const cceda::application::MeshingJobFailure& failure);
 
 private:

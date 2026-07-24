@@ -210,12 +210,13 @@ private:
     {
       if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr))
       {
-        if (GetLastError() == ERROR_BROKEN_PIPE)
+        const DWORD errorCode = GetLastError();
+        if (errorCode == ERROR_BROKEN_PIPE)
         {
           return NativeReadStatus::Closed;
         }
         error = QString("Cannot inspect control pipe: Windows error %1")
-          .arg(GetLastError());
+          .arg(errorCode);
         return NativeReadStatus::Error;
       }
       if (available == 0)
@@ -229,12 +230,13 @@ private:
     DWORD bytesRead = 0;
     if (!ReadFile(input, chunk, requested, &bytesRead, nullptr))
     {
-      if (GetLastError() == ERROR_BROKEN_PIPE)
+      const DWORD errorCode = GetLastError();
+      if (errorCode == ERROR_BROKEN_PIPE)
       {
         return NativeReadStatus::Closed;
       }
       error = QString("Cannot read control pipe: Windows error %1")
-        .arg(GetLastError());
+        .arg(errorCode);
       return NativeReadStatus::Error;
     }
     if (bytesRead == 0)
@@ -511,12 +513,16 @@ std::optional<CancellationRequest> parseCancellation(
   const QJsonObject payload = message.value("payload").toObject();
   const QString reason = payload.value("reason").toString();
   const QString deadlineUtc = payload.value("deadlineUtc").toString();
-  if (message.value("type").toString() != "cancel"
+  if (!hasOnlyKeys(message,
+      {"type", "protocol", "messageId", "jobId", "timestampUtc", "payload"})
+    || !hasOnlyKeys(protocol, {"major", "minor"})
+    || message.value("type").toString() != "cancel"
     || protocol.value("major").toInt(-1) != ProtocolMajor
     || protocol.value("minor").toInt(-1) < ProtocolMinor
     || message.value("messageId").toString().isEmpty()
     || message.value("jobId").toString() != jobId
-    || message.value("timestampUtc").toString().isEmpty()
+    || !QDateTime::fromString(
+      message.value("timestampUtc").toString(), Qt::ISODateWithMs).isValid()
     || !hasOnlyKeys(payload, {"reason", "deadlineUtc"})
     || reason.trimmed() != reason || reason.isEmpty() || reason.size() > 256
     || !QDateTime::fromString(deadlineUtc, Qt::ISODateWithMs).isValid())
@@ -839,6 +845,10 @@ int main(int argc, char* argv[])
   if (!writeJsonAtomically(*resultPath, result, error))
   {
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
+  }
+  if (const auto cancelled = checkCancellation(nullptr, "writing-result"))
+  {
+    return *cancelled;
   }
 
   sendProgress(jobId, "completed", 100);

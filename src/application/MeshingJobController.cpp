@@ -205,6 +205,10 @@ public:
       owner_, [this](const meshing::GmshWorkerResult& result) {
         workerSucceeded(result);
       });
+    QObject::connect(&workerClient_, &meshing::GmshWorkerClient::cancelled,
+      owner_, [this](const meshing::GmshWorkerCancellation& cancellation) {
+        workerCancelled(cancellation);
+      });
     QObject::connect(&workerClient_, &meshing::GmshWorkerClient::failed,
       owner_, [this](const meshing::GmshWorkerFailure& failure) {
         workerFailed(failure);
@@ -242,6 +246,7 @@ public:
       std::nullopt,
       std::nullopt,
     };
+    lastStage_ = "initializing";
     state_ = State::Preparing;
     const meshing::GmshExecutableJobWorkspaceRequest request{
       active_->workspace,
@@ -263,9 +268,75 @@ public:
     return std::nullopt;
   }
 
+  std::optional<MeshingJobFailure> cancel(
+    const QString& reason,
+    int deadlineMilliseconds)
+  {
+    const QString cleanReason = reason.trimmed();
+    if (!active_ || state_ == State::Idle || isCancelling()
+      || cleanReason.isEmpty() || cleanReason.size() > 256
+      || deadlineMilliseconds <= 0 || deadlineMilliseconds > 60'000)
+    {
+      return makeFailure(
+        MeshingJobFailureKind::InvalidRequest,
+        active_ ? active_->submission.jobId : QString{},
+        active_ ? active_->sourceGeometryRevision : projectState_.geometryRevision(),
+        "MESH_CANCELLATION_INVALID",
+        "cancelling",
+        "Cancellation requires one active job, a bounded reason, and a valid deadline");
+    }
+
+    if (state_ == State::Running)
+    {
+      if (const auto failure =
+          workerClient_.cancel(cleanReason, deadlineMilliseconds))
+      {
+        return makeFailure(
+          MeshingJobFailureKind::InvalidRequest,
+          active_->submission.jobId,
+          active_->sourceGeometryRevision,
+          failure->code,
+          failure->stage,
+          failure->detail,
+          failure->retryable);
+      }
+    }
+
+    cancellation_ = MeshingJobCancellation{
+      active_->submission.jobId,
+      active_->sourceGeometryRevision,
+      cleanReason,
+      lastStage_,
+      false,
+    };
+    switch (state_)
+    {
+      case State::Preparing:
+        state_ = State::CancellingPreparation;
+        break;
+      case State::Running:
+        state_ = State::CancellingWorker;
+        break;
+      case State::Verifying:
+        state_ = State::CancellingVerification;
+        break;
+      default:
+        break;
+    }
+    emit owner_->cancelling(*cancellation_);
+    return std::nullopt;
+  }
+
   bool isRunning() const noexcept
   {
     return state_ != State::Idle;
+  }
+
+  bool isCancelling() const noexcept
+  {
+    return state_ == State::CancellingPreparation
+      || state_ == State::CancellingWorker
+      || state_ == State::CancellingVerification;
   }
 
 private:
@@ -275,6 +346,9 @@ private:
     Preparing,
     Running,
     Verifying,
+    CancellingPreparation,
+    CancellingWorker,
+    CancellingVerification,
   };
 
   bool hasValidSubmission(
@@ -317,11 +391,17 @@ private:
 
   void preparationFinished()
   {
-    if (state_ != State::Preparing || !active_)
+    if ((state_ != State::Preparing && state_ != State::CancellingPreparation)
+      || !active_)
     {
       return;
     }
     const meshing::GmshJobWorkspaceResult result = preparationWatcher_.result();
+    if (state_ == State::CancellingPreparation)
+    {
+      finishCancelled();
+      return;
+    }
     if (!result.succeeded())
     {
       finishFailure(makeFailure(
@@ -341,6 +421,7 @@ private:
     }
 
     state_ = State::Running;
+    lastStage_ = "initializing";
     const auto startFailure = workerClient_.start({
       configuration_.workerExecutable,
       configuration_.backendExecutable,
@@ -364,14 +445,18 @@ private:
 
   void workerProgressed(const meshing::GmshWorkerProgress& progress)
   {
-    if (state_ == State::Running && active_)
+    if ((state_ == State::Running || state_ == State::CancellingWorker) && active_)
     {
-      emit owner_->progressChanged({
-        active_->submission.jobId,
-        active_->sourceGeometryRevision,
-        progress.stage,
-        progress.percent,
-      });
+      lastStage_ = progress.stage;
+      if (state_ == State::Running)
+      {
+        emit owner_->progressChanged({
+          active_->submission.jobId,
+          active_->sourceGeometryRevision,
+          progress.stage,
+          progress.percent,
+        });
+      }
     }
   }
 
@@ -389,6 +474,7 @@ private:
     }
 
     state_ = State::Verifying;
+    lastStage_ = "writing-result";
     const ActiveJob active = *active_;
     validationWatcher_.setFuture(
       QtConcurrent::run([active] { return validateArtifacts(active); }));
@@ -396,7 +482,8 @@ private:
 
   void workerFailed(const meshing::GmshWorkerFailure& failure)
   {
-    if (state_ != State::Running || !active_)
+    if ((state_ != State::Running && state_ != State::CancellingWorker)
+      || !active_)
     {
       return;
     }
@@ -415,14 +502,31 @@ private:
       failure.retryable));
   }
 
+  void workerCancelled(const meshing::GmshWorkerCancellation& cancellation)
+  {
+    if (state_ != State::CancellingWorker || !active_ || !cancellation_)
+    {
+      return;
+    }
+    cancellation_->stage = cancellation.stage;
+    cancellation_->forced = cancellation.forced;
+    finishCancelled();
+  }
+
   void validationFinished()
   {
-    if (state_ != State::Verifying || !active_
+    if ((state_ != State::Verifying && state_ != State::CancellingVerification)
+      || !active_
       || !active_->preparedJob || !active_->workerResult)
     {
       return;
     }
     const ArtifactValidation validation = validationWatcher_.result();
+    if (state_ == State::CancellingVerification)
+    {
+      finishCancelled();
+      return;
+    }
     if (!geometryIsCurrent())
     {
       finishFailure(staleFailure());
@@ -455,13 +559,33 @@ private:
     };
     state_ = State::Idle;
     active_.reset();
+    cancellation_.reset();
     emit owner_->experimentalSucceeded(result);
+  }
+
+  void finishCancelled()
+  {
+    if (!active_ || !cancellation_)
+    {
+      return;
+    }
+    if (active_->preparedJob)
+    {
+      QFile::remove(active_->preparedJob->meshPath);
+      QFile::remove(active_->preparedJob->resultPath);
+    }
+    const MeshingJobCancellation cancellation = *cancellation_;
+    state_ = State::Idle;
+    active_.reset();
+    cancellation_.reset();
+    emit owner_->cancelled(cancellation);
   }
 
   void finishFailure(MeshingJobFailure failure)
   {
     state_ = State::Idle;
     active_.reset();
+    cancellation_.reset();
     emit owner_->failed(failure);
   }
 
@@ -472,6 +596,8 @@ private:
   QFutureWatcher<meshing::GmshJobWorkspaceResult> preparationWatcher_;
   QFutureWatcher<ArtifactValidation> validationWatcher_;
   std::optional<ActiveJob> active_;
+  std::optional<MeshingJobCancellation> cancellation_;
+  QString lastStage_ = "initializing";
   State state_ = State::Idle;
 };
 
@@ -493,8 +619,20 @@ std::optional<MeshingJobFailure> MeshingJobController::submit(
   return implementation_->submit(submission);
 }
 
+std::optional<MeshingJobFailure> MeshingJobController::cancel(
+  const QString& reason,
+  int deadlineMilliseconds)
+{
+  return implementation_->cancel(reason, deadlineMilliseconds);
+}
+
 bool MeshingJobController::isRunning() const noexcept
 {
   return implementation_->isRunning();
+}
+
+bool MeshingJobController::isCancelling() const noexcept
+{
+  return implementation_->isCancelling();
 }
 }

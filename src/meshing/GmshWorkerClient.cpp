@@ -232,6 +232,7 @@ public:
     const QString cleanReason = reason.trimmed();
     if (process_.state() == QProcess::NotRunning
       || terminalEmitted_ || pendingResult_ || cancellationRequested_
+      || lastStage_ == "completed"
       || cleanReason.isEmpty() || cleanReason.size() > 256
       || deadlineMilliseconds <= 0 || deadlineMilliseconds > 60'000)
     {

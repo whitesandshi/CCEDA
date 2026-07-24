@@ -39,12 +39,15 @@ The current executable adapter has a matching main-side workspace builder. It ac
 
 The application layer owns the per-project meshing job state machine. It captures the current `GeometryRevision`, prepares and verifies large artifacts on background threads, allows at most one active job, and rechecks the authoritative project revision before Worker launch and before publishing a result. Its public DTOs contain no Gmsh tags or process handles. The current success remains explicitly experimental: the controller verifies the manifest identity and intermediate-mesh SHA-256 but does not commit `ProjectState` until the versioned geometry mapping and neutral result formats are complete.
 
+Cancellation is an explicit application and protocol state rather than a generic failure. Main sends one bounded reason and deadline, Worker acknowledges at a safe checkpoint, terminates its Gmsh child, removes formal mesh/result output, reports `cancelled`, and exits. Main uses a single-shot deadline to force-terminate an unresponsive Worker. Preparation and result verification finish safely in the background but suppress publication after cancellation; no cancellation path mutates `ProjectState`.
+
 ## Sources
 
 - Qt CMake project setup: https://doc.qt.io/qt-6/cmake-get-started.html
 - Qt main-window framework: https://doc.qt.io/qt-6/qmainwindow.html
 - Qt model/view architecture: https://doc.qt.io/qt-6/model-view-programming.html
 - Qt process lifecycle and channels: https://doc.qt.io/qt-6.8/qprocess.html
+- Qt single-shot cancellation deadlines: https://doc.qt.io/qt-6.8/qtimer.html
 - Qt atomic file replacement: https://doc.qt.io/qt-6.8/qsavefile.html
 - Qt concurrent function execution: https://doc.qt.io/qt-6.8/qtconcurrentrun.html
 - Qt future completion monitoring: https://doc.qt.io/qt-6.8/qfuturewatcher.html
