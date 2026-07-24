@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -15,6 +16,13 @@
 
 #include <cstdio>
 #include <optional>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#else
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -95,29 +103,187 @@ std::optional<QJsonObject> readJsonFile(const QString& path, QString& error)
   return document.object();
 }
 
-std::optional<QJsonObject> readControlMessage(QString& error)
+enum class ControlReadStatus
 {
-  QFile input;
-  if (!input.open(stdin, QIODevice::ReadOnly))
+  None,
+  Message,
+  Closed,
+  Error,
+};
+
+struct ControlReadResult
+{
+  ControlReadStatus status = ControlReadStatus::None;
+  QJsonObject message;
+  QString error;
+};
+
+class ControlChannel
+{
+public:
+  ControlReadResult readBlocking()
   {
-    error = "Cannot open standard input";
-    return std::nullopt;
+    return read(true);
   }
-  const QByteArray line = input.readLine(MaximumJsonBytes + 1);
-  if (line.isEmpty() || line.size() > MaximumJsonBytes)
+
+  ControlReadResult poll()
   {
-    error = "Missing or oversized helloAck";
-    return std::nullopt;
+    return read(false);
   }
-  QJsonParseError parseError;
-  const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
-  if (parseError.error != QJsonParseError::NoError || !document.isObject())
+
+private:
+  enum class NativeReadStatus
   {
-    error = QString("Invalid helloAck JSON: %1").arg(parseError.errorString());
-    return std::nullopt;
+    None,
+    Data,
+    Closed,
+    Error,
+  };
+
+  ControlReadResult read(bool blocking)
+  {
+    while (true)
+    {
+      const qsizetype delimiter = buffer_.indexOf('\n');
+      if (delimiter >= 0)
+      {
+        const QByteArray line = buffer_.left(delimiter);
+        buffer_.remove(0, delimiter + 1);
+        if (line.isEmpty() || line.size() > MaximumJsonBytes)
+        {
+          return {ControlReadStatus::Error, {}, "Empty or oversized control message"};
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject())
+        {
+          return {
+            ControlReadStatus::Error,
+            {},
+            QString("Invalid control JSON: %1").arg(parseError.errorString()),
+          };
+        }
+        return {ControlReadStatus::Message, document.object(), {}};
+      }
+      if (buffer_.size() > MaximumJsonBytes)
+      {
+        return {ControlReadStatus::Error, {}, "Control message exceeds the byte limit"};
+      }
+
+      QString error;
+      const NativeReadStatus nativeStatus = readNative(blocking, error);
+      if (nativeStatus == NativeReadStatus::Data)
+      {
+        continue;
+      }
+      if (nativeStatus == NativeReadStatus::Closed)
+      {
+        return {ControlReadStatus::Closed, {}, "Main control channel closed"};
+      }
+      if (nativeStatus == NativeReadStatus::Error)
+      {
+        return {ControlReadStatus::Error, {}, std::move(error)};
+      }
+      return {};
+    }
   }
-  return document.object();
-}
+
+  NativeReadStatus readNative(bool blocking, QString& error)
+  {
+    char chunk[4096];
+#ifdef Q_OS_WIN
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input == nullptr || input == INVALID_HANDLE_VALUE)
+    {
+      error = "Cannot access standard input";
+      return NativeReadStatus::Error;
+    }
+    const DWORD inputType = GetFileType(input);
+    if (!blocking && inputType == FILE_TYPE_DISK)
+    {
+      // Process-level tests can provide a sealed control file containing only
+      // helloAck. Such a file has no live cancellation channel to poll.
+      return NativeReadStatus::None;
+    }
+    DWORD available = 0;
+    if (!blocking)
+    {
+      if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr))
+      {
+        if (GetLastError() == ERROR_BROKEN_PIPE)
+        {
+          return NativeReadStatus::Closed;
+        }
+        error = QString("Cannot inspect control pipe: Windows error %1")
+          .arg(GetLastError());
+        return NativeReadStatus::Error;
+      }
+      if (available == 0)
+      {
+        return NativeReadStatus::None;
+      }
+    }
+    const DWORD requested = blocking
+      ? static_cast<DWORD>(sizeof(chunk))
+      : qMin<DWORD>(available, static_cast<DWORD>(sizeof(chunk)));
+    DWORD bytesRead = 0;
+    if (!ReadFile(input, chunk, requested, &bytesRead, nullptr))
+    {
+      if (GetLastError() == ERROR_BROKEN_PIPE)
+      {
+        return NativeReadStatus::Closed;
+      }
+      error = QString("Cannot read control pipe: Windows error %1")
+        .arg(GetLastError());
+      return NativeReadStatus::Error;
+    }
+    if (bytesRead == 0)
+    {
+      return NativeReadStatus::Closed;
+    }
+    buffer_.append(chunk, static_cast<qsizetype>(bytesRead));
+#else
+    if (!blocking)
+    {
+      pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+      const int pollResult = ::poll(&descriptor, 1, 0);
+      if (pollResult < 0)
+      {
+        error = "Cannot inspect control pipe";
+        return NativeReadStatus::Error;
+      }
+      if (pollResult == 0)
+      {
+        return NativeReadStatus::None;
+      }
+      if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0)
+      {
+        error = "Control pipe reported an error";
+        return NativeReadStatus::Error;
+      }
+      if ((descriptor.revents & POLLIN) == 0
+        && (descriptor.revents & POLLHUP) != 0)
+      {
+        return NativeReadStatus::Closed;
+      }
+    }
+    const ssize_t bytesRead = ::read(STDIN_FILENO, chunk, sizeof(chunk));
+    if (bytesRead < 0)
+    {
+      error = "Cannot read control pipe";
+      return NativeReadStatus::Error;
+    }
+    if (bytesRead == 0)
+    {
+      return NativeReadStatus::Closed;
+    }
+    buffer_.append(chunk, static_cast<qsizetype>(bytesRead));
+#endif
+    return NativeReadStatus::Data;
+  }
+
+  QByteArray buffer_;
+};
 
 QString sha256(const QString& path, QString& error)
 {
@@ -329,6 +495,37 @@ bool hasOnlyKeys(const QJsonObject& object, const QSet<QString>& allowed)
   }
   return true;
 }
+
+struct CancellationRequest
+{
+  QString reason;
+  QString deadlineUtc;
+};
+
+std::optional<CancellationRequest> parseCancellation(
+  const QJsonObject& message,
+  const QString& jobId,
+  QString& error)
+{
+  const QJsonObject protocol = message.value("protocol").toObject();
+  const QJsonObject payload = message.value("payload").toObject();
+  const QString reason = payload.value("reason").toString();
+  const QString deadlineUtc = payload.value("deadlineUtc").toString();
+  if (message.value("type").toString() != "cancel"
+    || protocol.value("major").toInt(-1) != ProtocolMajor
+    || protocol.value("minor").toInt(-1) < ProtocolMinor
+    || message.value("messageId").toString().isEmpty()
+    || message.value("jobId").toString() != jobId
+    || message.value("timestampUtc").toString().isEmpty()
+    || !hasOnlyKeys(payload, {"reason", "deadlineUtc"})
+    || reason.trimmed() != reason || reason.isEmpty() || reason.size() > 256
+    || !QDateTime::fromString(deadlineUtc, Qt::ISODateWithMs).isValid())
+  {
+    error = "Cancellation message does not match the active job or protocol";
+    return std::nullopt;
+  }
+  return CancellationRequest{reason, deadlineUtc};
+}
 } // namespace
 
 int main(int argc, char* argv[])
@@ -375,16 +572,19 @@ int main(int argc, char* argv[])
     }},
   });
 
-  const auto helloAck = readControlMessage(error);
-  if (!helloAck)
+  ControlChannel controlChannel;
+  const ControlReadResult helloAckRead = controlChannel.readBlocking();
+  if (helloAckRead.status != ControlReadStatus::Message)
   {
-    return fail({}, "MESH_PROTOCOL_INCOMPATIBLE", "initializing", error);
+    return fail({}, "MESH_PROTOCOL_INCOMPATIBLE", "initializing",
+      helloAckRead.error.isEmpty() ? "Missing helloAck" : helloAckRead.error);
   }
-  const QString jobId = helloAck->value("jobId").toString();
-  const QJsonObject ackProtocol = helloAck->value("protocol").toObject();
+  const QJsonObject helloAck = helloAckRead.message;
+  const QString jobId = helloAck.value("jobId").toString();
+  const QJsonObject ackProtocol = helloAck.value("protocol").toObject();
   const QString acknowledgedWorkspace =
-    QDir::cleanPath(helloAck->value("payload").toObject().value("workspace").toString());
-  if (helloAck->value("type").toString() != "helloAck"
+    QDir::cleanPath(helloAck.value("payload").toObject().value("workspace").toString());
+  if (helloAck.value("type").toString() != "helloAck"
     || ackProtocol.value("major").toInt(-1) != ProtocolMajor
     || jobId.isEmpty()
     || acknowledgedWorkspace.compare(workspace, Qt::CaseInsensitive) != 0)
@@ -462,6 +662,62 @@ int main(int argc, char* argv[])
       "Cannot create controlled output directories");
   }
 
+  auto checkCancellation =
+    [&](QProcess* backendProcess, const QString& stage) -> std::optional<int> {
+      const ControlReadResult control = controlChannel.poll();
+      if (control.status == ControlReadStatus::None)
+      {
+        return std::nullopt;
+      }
+      if (control.status == ControlReadStatus::Closed
+        || control.status == ControlReadStatus::Error)
+      {
+        if (backendProcess != nullptr
+          && backendProcess->state() != QProcess::NotRunning)
+        {
+          backendProcess->kill();
+          backendProcess->waitForFinished(5000);
+        }
+        QFile::remove(temporaryMeshPath);
+        return fail(jobId, "MESH_WORKER_LOST", stage, control.error);
+      }
+
+      QString cancellationError;
+      const auto cancellation =
+        parseCancellation(control.message, jobId, cancellationError);
+      if (!cancellation)
+      {
+        if (backendProcess != nullptr
+          && backendProcess->state() != QProcess::NotRunning)
+        {
+          backendProcess->kill();
+          backendProcess->waitForFinished(5000);
+        }
+        QFile::remove(temporaryMeshPath);
+        return fail(jobId, "MESH_PROTOCOL_INCOMPATIBLE", stage, cancellationError);
+      }
+
+      sendMessage("cancelAck", jobId, QJsonObject{
+        {"reason", cancellation->reason},
+        {"deadlineUtc", cancellation->deadlineUtc},
+      });
+      if (backendProcess != nullptr
+        && backendProcess->state() != QProcess::NotRunning)
+      {
+        backendProcess->kill();
+        backendProcess->waitForFinished(5000);
+      }
+      QFile::remove(temporaryMeshPath);
+      QFile::remove(*meshPath);
+      QFile::remove(*resultPath);
+      sendMessage("cancelled", jobId, QJsonObject{
+        {"reason", cancellation->reason},
+        {"stage", stage},
+        {"forced", false},
+      });
+      return 0;
+    };
+
   const double minimumSize = settings.value("minimumSizeMm").toDouble(0.0);
   const double maximumSize = settings.value("maximumSizeMm").toDouble(0.0);
   if (minimumSize < 0.0 || maximumSize < 0.0
@@ -473,6 +729,10 @@ int main(int argc, char* argv[])
 
   sendProgress(jobId, "loading-geometry", 15);
   sendProgress(jobId, "generating-volume", 35);
+  if (const auto cancelled = checkCancellation(nullptr, "generating-volume"))
+  {
+    return *cancelled;
+  }
   QFile::remove(temporaryMeshPath);
   QStringList gmshArguments{
     *inputPath,
@@ -497,12 +757,36 @@ int main(int argc, char* argv[])
   gmsh.setStandardInputFile(QProcess::nullDevice());
   gmsh.setStandardOutputFile(*logPath, QIODevice::Truncate);
   gmsh.start(gmshExecutable, gmshArguments, QIODevice::ReadOnly);
-  if (!gmsh.waitForStarted(5000) || !gmsh.waitForFinished(30000))
+  if (!gmsh.waitForStarted(5000))
   {
     gmsh.kill();
     gmsh.waitForFinished(5000);
     return fail(jobId, "MESH_WORKER_LOST", "generating-volume",
-      QString("Gmsh did not finish: %1").arg(gmsh.errorString()));
+      QString("Gmsh did not start: %1").arg(gmsh.errorString()));
+  }
+  QElapsedTimer gmshDeadline;
+  gmshDeadline.start();
+  while (gmsh.state() != QProcess::NotRunning)
+  {
+    if (const auto cancelled = checkCancellation(&gmsh, "generating-volume"))
+    {
+      return *cancelled;
+    }
+    if (gmsh.waitForFinished(25))
+    {
+      break;
+    }
+    if (gmshDeadline.elapsed() >= 30'000)
+    {
+      gmsh.kill();
+      gmsh.waitForFinished(5000);
+      return fail(jobId, "MESH_WORKER_LOST", "generating-volume",
+        "Gmsh exceeded the executable-adapter time limit");
+    }
+  }
+  if (const auto cancelled = checkCancellation(&gmsh, "generating-volume"))
+  {
+    return *cancelled;
   }
   if (gmsh.exitStatus() != QProcess::NormalExit || gmsh.exitCode() != 0
     || !QFileInfo(temporaryMeshPath).isFile())
@@ -524,6 +808,10 @@ int main(int argc, char* argv[])
   {
     QFile::remove(temporaryMeshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
+  }
+  if (const auto cancelled = checkCancellation(nullptr, "writing-result"))
+  {
+    return *cancelled;
   }
   if (QFileInfo::exists(*meshPath) || !QFile::rename(temporaryMeshPath, *meshPath))
   {

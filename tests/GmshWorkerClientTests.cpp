@@ -221,11 +221,76 @@ RunOutcome runForcedCancellation(
   loop.exec();
   return outcome;
 }
+
+RunOutcome runCooperativeCancellation(
+  const cceda::meshing::GmshWorkerLaunchRequest& request)
+{
+  cceda::meshing::GmshWorkerClient client;
+  QEventLoop loop;
+  QTimer timeout;
+  timeout.setSingleShot(true);
+  RunOutcome outcome;
+  bool cancellationRequested = false;
+
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::progressChanged,
+    &loop, [&](const cceda::meshing::GmshWorkerProgress& progress) {
+      outcome.stages.push_back(progress.stage);
+      if (!cancellationRequested && progress.stage == "generating-volume")
+      {
+        cancellationRequested = true;
+        if (const auto cancelFailure = client.cancel("cooperative test", 2'000))
+        {
+          outcome.failure = cancelFailure;
+          loop.quit();
+        }
+      }
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::succeeded,
+    &loop, [&](const cceda::meshing::GmshWorkerResult& result) {
+      outcome.result = result;
+      loop.quit();
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::failed,
+    &loop, [&](const cceda::meshing::GmshWorkerFailure& failure) {
+      outcome.failure = failure;
+      loop.quit();
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::cancelled,
+    &loop, [&](const cceda::meshing::GmshWorkerCancellation& cancellation) {
+      outcome.cancellation = cancellation;
+      loop.quit();
+    });
+  QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+    outcome.timedOut = true;
+    loop.quit();
+  });
+
+  if (const auto startFailure = client.start(request))
+  {
+    outcome.failure = startFailure;
+    return outcome;
+  }
+  timeout.start(5'000);
+  loop.exec();
+  return outcome;
+}
 }
 
 int main(int argc, char* argv[])
 {
   QCoreApplication application(argc, argv);
+  if (argc == 2
+    && (QString::fromLocal8Bit(argv[1]) == "-version"
+      || QString::fromLocal8Bit(argv[1]) == "--version"))
+  {
+    std::fputs("4.13.1\n", stdout);
+    return 0;
+  }
+  if (application.arguments().contains("-3"))
+  {
+    QThread::msleep(10'000);
+    return 1;
+  }
   if (argc == 5 && QString::fromLocal8Bit(argv[1]) == "--workspace")
   {
     if (QString::fromLocal8Bit(argv[2]).contains("force-cancel"))
@@ -344,6 +409,48 @@ int main(int argc, char* argv[])
       "deadline cancellation should be marked forced")
     || !expect(forceCancelled.cancellation->reason == "test cancellation",
       "cancellation reason did not round-trip"))
+  {
+    return 1;
+  }
+
+  TestWorkspace cooperativeWorkspace("cooperative-cancel");
+  if (!expect(cooperativeWorkspace.isValid(),
+      "cooperative-cancel workspace is unavailable")
+    || !expect(writeRequest(cooperativeWorkspace.path(), stepPath, 17),
+      "cannot write the cooperative-cancel request"))
+  {
+    return 1;
+  }
+  const RunOutcome cooperativeCancelled = runCooperativeCancellation({
+    workerPath,
+    QCoreApplication::applicationFilePath(),
+    cooperativeWorkspace.path(),
+    "worker-client-test",
+    17,
+    "client-tests",
+  });
+  if (cooperativeCancelled.failure)
+  {
+    std::cerr << "Cooperative cancellation failure: "
+              << cooperativeCancelled.failure->code.toStdString() << " at "
+              << cooperativeCancelled.failure->stage.toStdString() << ": "
+              << cooperativeCancelled.failure->detail.toStdString() << '\n';
+  }
+  if (!expect(!cooperativeCancelled.timedOut, "cooperative cancellation timed out")
+    || !expect(!cooperativeCancelled.result.has_value(),
+      "cooperative cancellation published a result")
+    || !expect(!cooperativeCancelled.failure.has_value(),
+      "cooperative cancellation reported failure")
+    || !expect(cooperativeCancelled.cancellation.has_value(),
+      "cooperative cancellation did not publish its terminal state")
+    || !expect(!cooperativeCancelled.cancellation->forced,
+      "responsive Worker cancellation should not be forced")
+    || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
+      "output/gmsh-intermediate.msh")).exists(),
+      "cancelled job retained a formal mesh output")
+    || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
+      "output/result.json")).exists(),
+      "cancelled job retained a result manifest"))
   {
     return 1;
   }
