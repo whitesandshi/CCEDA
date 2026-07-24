@@ -28,6 +28,7 @@
 
 namespace
 {
+namespace domain = cceda::domain;
 using cceda::domain::GeometryEntity;
 using cceda::domain::GeometryKind;
 
@@ -66,32 +67,6 @@ std::string nodeName(const XCAFPrs_DocumentNode& node, std::size_t index)
   return name;
 }
 
-GeometryKind shapeKind(const XCAFPrs_DocumentNode& node,
-                       const TopoDS_Shape& shape,
-                       std::size_t solidCount)
-{
-  if (node.IsAssembly)
-  {
-    return GeometryKind::Assembly;
-  }
-  if (solidCount > 1 || shape.ShapeType() == TopAbs_COMPOUND
-      || shape.ShapeType() == TopAbs_COMPSOLID)
-  {
-    return GeometryKind::Part;
-  }
-
-  switch (shape.ShapeType())
-  {
-    case TopAbs_SOLID: return GeometryKind::Solid;
-    case TopAbs_SHELL: return GeometryKind::Shell;
-    case TopAbs_FACE: return GeometryKind::Face;
-    case TopAbs_WIRE: return GeometryKind::Wire;
-    case TopAbs_EDGE: return GeometryKind::Edge;
-    case TopAbs_VERTEX: return GeometryKind::Vertex;
-    default: return GeometryKind::Other;
-  }
-}
-
 GeometryEntity makeEntity(const XCAFPrs_DocumentNode& node,
                           const TopoDS_Shape& shape,
                           const std::string& parentId,
@@ -105,9 +80,9 @@ GeometryEntity makeEntity(const XCAFPrs_DocumentNode& node,
   entity.faceCount = uniqueSubshapeCount(shape, TopAbs_FACE);
   entity.edgeCount = uniqueSubshapeCount(shape, TopAbs_EDGE);
   entity.vertexCount = uniqueSubshapeCount(shape, TopAbs_VERTEX);
-  entity.kind = shapeKind(node, shape, entity.solidCount);
+  entity.kind = node.IsAssembly ? GeometryKind::Assembly : GeometryKind::Part;
   entity.valid = !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
-  entity.meshable = entity.kind == GeometryKind::Solid && entity.valid;
+  entity.meshable = false;
 
   if (entity.solidCount > 0)
   {
@@ -123,6 +98,96 @@ GeometryEntity makeEntity(const XCAFPrs_DocumentNode& node,
     entity.color.explicitColor = true;
   }
   return entity;
+}
+
+std::string topologyId(domain::GeometryRevision revision,
+                       const std::string& ownerId,
+                       const char* kind,
+                       int index)
+{
+  return "geometry/" + std::to_string(revision) + "/" + ownerId + "/"
+    + kind + "/" + std::to_string(index);
+}
+
+GeometryEntity makeTopologyEntity(const TopoDS_Shape& shape,
+                                  GeometryKind kind,
+                                  std::string id,
+                                  std::string parentId,
+                                  std::string name,
+                                  const domain::GeometryColor& color)
+{
+  GeometryEntity entity;
+  entity.id = std::move(id);
+  entity.parentId = std::move(parentId);
+  entity.name = std::move(name);
+  entity.kind = kind;
+  entity.color = color;
+  entity.solidCount = uniqueSubshapeCount(shape, TopAbs_SOLID);
+  entity.faceCount = uniqueSubshapeCount(shape, TopAbs_FACE);
+  entity.edgeCount = uniqueSubshapeCount(shape, TopAbs_EDGE);
+  entity.vertexCount = uniqueSubshapeCount(shape, TopAbs_VERTEX);
+  entity.valid = BRepCheck_Analyzer(shape).IsValid();
+  entity.meshable = kind == GeometryKind::Solid && entity.valid;
+  if (kind == GeometryKind::Solid)
+  {
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(shape, properties);
+    entity.volume = std::abs(properties.Mass());
+  }
+  return entity;
+}
+
+void appendSolidAndFaceEntities(domain::GeometryDocument& document,
+                                const GeometryEntity& owner,
+                                const TopoDS_Shape& shape)
+{
+  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> solids;
+  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
+  TopExp::MapShapes(shape, TopAbs_SOLID, solids);
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+
+  std::vector<std::string> solidIds(static_cast<std::size_t>(solids.Extent()) + 1);
+  for (int index = 1; index <= solids.Extent(); ++index)
+  {
+    solidIds[static_cast<std::size_t>(index)] =
+      topologyId(document.revision, owner.id, "solid", index);
+    document.entities.push_back(makeTopologyEntity(
+      solids.FindKey(index),
+      GeometryKind::Solid,
+      solidIds[static_cast<std::size_t>(index)],
+      owner.id,
+      "Solid " + std::to_string(index),
+      owner.color));
+  }
+
+  NCollection_IndexedDataMap<TopoDS_Shape,
+    NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher> faceAncestors;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_FACE, TopAbs_SOLID, faceAncestors);
+  for (int index = 1; index <= faces.Extent(); ++index)
+  {
+    const TopoDS_Shape& face = faces.FindKey(index);
+    std::string parentId = owner.id;
+    if (faceAncestors.Contains(face))
+    {
+      const NCollection_List<TopoDS_Shape>& ancestors =
+        faceAncestors.FindFromKey(face);
+      if (!ancestors.IsEmpty())
+      {
+        const int solidIndex = solids.FindIndex(ancestors.First());
+        if (solidIndex > 0)
+        {
+          parentId = solidIds[static_cast<std::size_t>(solidIndex)];
+        }
+      }
+    }
+    document.entities.push_back(makeTopologyEntity(
+      face,
+      GeometryKind::Face,
+      topologyId(document.revision, owner.id, "face", index),
+      std::move(parentId),
+      "Face " + std::to_string(index),
+      owner.color));
+  }
 }
 }
 
@@ -203,6 +268,7 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
         domainDocument.faceCount += entity.faceCount;
         domainDocument.edgeCount += entity.edgeCount;
         domainDocument.vertexCount += entity.vertexCount;
+        appendSolidAndFaceEntities(domainDocument, entity, shape);
 
         OccShapeRecord record;
         record.id = entity.id;
