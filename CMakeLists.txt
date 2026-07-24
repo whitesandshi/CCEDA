@@ -44,6 +44,12 @@ add_library(cceda_mesh_gmsh STATIC
 target_include_directories(cceda_mesh_gmsh PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_gmsh PUBLIC cceda_domain)
 
+add_library(cceda_meshing_worker_client STATIC
+    src/meshing/GmshWorkerClient.cpp
+    src/meshing/GmshWorkerClient.h)
+target_include_directories(cceda_meshing_worker_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_meshing_worker_client PUBLIC Qt6::Core cceda_domain)
+
 add_library(cceda_geometry_occ STATIC
     src/geometry/OccGeometryRepository.cpp
     src/geometry/OccGeometryService.cpp)
@@ -94,7 +100,7 @@ set_target_properties(CCEDA PROPERTIES
     VS_DEBUGGER_ENVIRONMENT "PATH=${OpenCASCADE_BINARY_DIR};${CCEDA_QT_ROOT}/bin;%PATH%")
 
 if(MSVC)
-    foreach(target cceda_domain cceda_mesh_gmsh cceda_geometry_occ cceda_visualization_occ cceda_gmsh_worker CCEDA)
+    foreach(target cceda_domain cceda_mesh_gmsh cceda_meshing_worker_client cceda_geometry_occ cceda_visualization_occ cceda_gmsh_worker CCEDA)
         target_compile_options(${target} PRIVATE /utf-8 /W4)
     endforeach()
 endif()
@@ -124,6 +130,7 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT CCEDA)
 set_target_properties(
     cceda_domain
     cceda_mesh_gmsh
+    cceda_meshing_worker_client
     cceda_geometry_occ
     cceda_visualization_occ
     PROPERTIES
@@ -159,6 +166,23 @@ if(BUILD_TESTING)
         tests/GmshMsh41ReaderTests.cpp)
     target_link_libraries(cceda_gmsh_msh41_reader_tests PRIVATE cceda_mesh_gmsh)
     add_test(NAME meshing.gmsh_msh41_reader COMMAND cceda_gmsh_msh41_reader_tests)
+
+    add_executable(cceda_gmsh_worker_client_tests
+        tests/GmshWorkerClientTests.cpp)
+    target_link_libraries(cceda_gmsh_worker_client_tests PRIVATE
+        Qt6::Core
+        cceda_meshing_worker_client)
+    add_dependencies(cceda_gmsh_worker_client_tests cceda_gmsh_worker)
+    add_test(
+        NAME meshing.worker_client
+        COMMAND cceda_gmsh_worker_client_tests
+                $<TARGET_FILE:cceda_gmsh_worker>
+                ${CCEDA_GMSH_EXECUTABLE}
+                D:/Projects/OpenCASCADE-8.0.0/install/data/step/screw.step)
+    set_tests_properties(meshing.worker_client PROPERTIES
+        TIMEOUT 70
+        LABELS "integration;meshing"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
 
     add_executable(cceda_geometry_import_tests tests/GeometryImportTests.cpp)
     target_link_libraries(cceda_geometry_import_tests PRIVATE
