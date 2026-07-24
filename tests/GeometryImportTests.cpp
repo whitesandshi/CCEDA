@@ -1,4 +1,6 @@
 #include "geometry/IGeometryService.h"
+#include "geometry/OccGeometryRepository.h"
+#include "geometry/OccGeometryService.h"
 
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <IFSelect_ReturnStatus.hxx>
@@ -72,7 +74,8 @@ int main(int argc, char** argv)
     return 2;
   }
 
-  const auto service = cceda::geometry::createOccGeometryService();
+  const auto repository = std::make_shared<cceda::geometry::OccGeometryRepository>();
+  const auto service = std::make_shared<cceda::geometry::OccGeometryService>(repository);
   const auto result = service->importStep(stepPath);
   if (!result.success)
   {
@@ -99,6 +102,35 @@ int main(int argc, char** argv)
     return 1;
   }
 
+  std::string indexedGeometryId;
+  for (const cceda::domain::GeometryEntity& entity : result.document.entities)
+  {
+    if (entity.kind != cceda::domain::GeometryKind::Solid
+        && entity.kind != cceda::domain::GeometryKind::Face)
+    {
+      continue;
+    }
+    const auto lookup = repository->lookupTopologyShape(result.document.revision, entity.id);
+    const TopAbs_ShapeEnum expectedType = entity.kind == cceda::domain::GeometryKind::Solid
+      ? TopAbs_SOLID : TopAbs_FACE;
+    if (lookup.status != cceda::geometry::OccShapeLookupStatus::Found
+        || lookup.shape.IsNull() || lookup.shape.ShapeType() != expectedType)
+    {
+      std::cerr << "A topology GeometryId does not resolve to its OCCT shape.\n";
+      return 1;
+    }
+    indexedGeometryId = entity.id;
+  }
+  if (indexedGeometryId.empty()
+      || repository->lookupTopologyShape(result.document.revision + 1, indexedGeometryId).status
+        != cceda::geometry::OccShapeLookupStatus::RevisionMismatch
+      || repository->lookupTopologyShape(result.document.revision, "missing").status
+        != cceda::geometry::OccShapeLookupStatus::NotFound)
+  {
+    std::cerr << "Topology lookup must reject a mismatched geometry revision.\n";
+    return 1;
+  }
+
   const auto repeated = service->importStep(stepPath);
   const TopologySummary repeatedTopology = summarizeTopology(repeated.document);
   bool revisionsShareTopologyIds = false;
@@ -114,7 +146,10 @@ int main(int argc, char** argv)
       || !repeatedTopology.uniqueIds
       || repeatedTopology.solids != repeated.document.solidCount
       || repeatedTopology.faces != repeated.document.faceCount
-      || revisionsShareTopologyIds)
+      || revisionsShareTopologyIds
+      || repository->lookupTopologyShape(
+        repeated.document.revision, indexedGeometryId).status
+        != cceda::geometry::OccShapeLookupStatus::NotFound)
   {
     std::cerr << "Topology IDs must be scoped to exactly one geometry revision.\n";
     return 1;

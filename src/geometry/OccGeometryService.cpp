@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -139,7 +140,8 @@ GeometryEntity makeTopologyEntity(const TopoDS_Shape& shape,
 
 void appendSolidAndFaceEntities(domain::GeometryDocument& document,
                                 const GeometryEntity& owner,
-                                const TopoDS_Shape& shape)
+                                const TopoDS_Shape& shape,
+                                std::unordered_map<std::string, TopoDS_Shape>& topologyShapes)
 {
   NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> solids;
   NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
@@ -149,10 +151,12 @@ void appendSolidAndFaceEntities(domain::GeometryDocument& document,
   std::vector<std::string> solidIds(static_cast<std::size_t>(solids.Extent()) + 1);
   for (int index = 1; index <= solids.Extent(); ++index)
   {
+    const TopoDS_Shape& solid = solids.FindKey(index);
     solidIds[static_cast<std::size_t>(index)] =
       topologyId(document.revision, owner.id, "solid", index);
+    topologyShapes.emplace(solidIds[static_cast<std::size_t>(index)], solid);
     document.entities.push_back(makeTopologyEntity(
-      solids.FindKey(index),
+      solid,
       GeometryKind::Solid,
       solidIds[static_cast<std::size_t>(index)],
       owner.id,
@@ -187,6 +191,7 @@ void appendSolidAndFaceEntities(domain::GeometryDocument& document,
       std::move(parentId),
       "Face " + std::to_string(index),
       owner.color));
+    topologyShapes.emplace(document.entities.back().id, face);
   }
 }
 }
@@ -238,6 +243,7 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
     domainDocument.sourceName = path.filename().u8string();
 
     std::vector<OccShapeRecord> records;
+    std::unordered_map<std::string, TopoDS_Shape> topologyShapes;
     std::vector<std::string> idsByDepth;
     std::size_t nodeIndex = 0;
     for (XCAFPrs_DocumentExplorer explorer(document, XCAFPrs_DocumentExplorerFlags_None);
@@ -268,7 +274,7 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
         domainDocument.faceCount += entity.faceCount;
         domainDocument.edgeCount += entity.edgeCount;
         domainDocument.vertexCount += entity.vertexCount;
-        appendSolidAndFaceEntities(domainDocument, entity, shape);
+        appendSolidAndFaceEntities(domainDocument, entity, shape, topologyShapes);
 
         OccShapeRecord record;
         record.id = entity.id;
@@ -286,7 +292,8 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
       return result;
     }
 
-    repository_->replace(document, domainDocument, std::move(records));
+    repository_->replace(
+      document, domainDocument, std::move(records), std::move(topologyShapes));
     result.success = true;
     result.document = std::move(domainDocument);
     return result;

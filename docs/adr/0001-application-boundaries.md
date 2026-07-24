@@ -33,6 +33,8 @@ The project aggregate owns at most one current neutral mesh. It accepts only a s
 
 ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader treats Worker output as untrusted, requires caller-provided byte/count limits, validates the complete low-order Gmsh topology, and removes Gmsh entity tags while applying typed stable entity/region mappings. The typed mapping contract deliberately does not freeze the pending `geometry-map.json` storage schema.
 
+The OCCT importer treats XCAF leaves as Parts and indexes their unique Solid and Face topology with opaque IDs scoped to one `GeometryRevision`. The OCCT repository retains the reverse ID-to-shape association and rejects lookups for a different revision; `TopoDS_Shape` remains inside the geometry adapter. These IDs establish the geometry side of a future meshing snapshot but do not imply any relation to Gmsh entity tags or freeze an association-file format.
+
 The main-side Worker client is a separate QtCore adapter. It owns `QProcess`, treats standard output as untrusted bounded NDJSON, performs the versioned handshake, checks job and source-revision identity, and emits only neutral progress/result/failure DTOs. A result is published only after both a valid result message and normal process exit; process failures never mutate project state.
 
 The current executable adapter has a matching main-side workspace builder. It accepts only an absent or empty absolute workspace, copies a bounded STEP snapshot while computing SHA-256, fixes all relative input/output paths, and atomically publishes `request.json` last. This protocol-0.1 helper is intentionally named for the executable adapter and does not freeze the final BREP, geometry-map, or meshbin formats.
