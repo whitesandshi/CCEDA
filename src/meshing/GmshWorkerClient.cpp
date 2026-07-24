@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QTimer>
 
 #include <algorithm>
 #include <utility>
@@ -69,6 +70,7 @@ public:
   explicit Implementation(GmshWorkerClient* owner)
     : owner_(owner)
   {
+    cancellationDeadline_.setSingleShot(true);
     // Qt documents QProcess as a sequential I/O device and provides these
     // signals for asynchronous output, errors, and completion.
     // https://doc.qt.io/qt-6.8/qprocess.html#communicating-via-channels
@@ -78,7 +80,7 @@ public:
       owner_, [this] { consumeErrorOutput(); });
     QObject::connect(&process_, &QProcess::errorOccurred,
       owner_, [this](QProcess::ProcessError error) {
-        if (error != QProcess::UnknownError)
+        if (error != QProcess::UnknownError && !forcedCancellation_)
         {
           fail(makeFailure(
             GmshWorkerFailureKind::WorkerLost,
@@ -92,6 +94,7 @@ public:
       qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
       owner_,
       [this](int exitCode, QProcess::ExitStatus exitStatus) {
+        cancellationDeadline_.stop();
         consumeOutput();
         consumeErrorOutput();
         if (terminalEmitted_)
@@ -101,6 +104,17 @@ public:
         if (!outputBuffer_.isEmpty())
         {
           fail(protocolFailure("Worker output ended without a message delimiter"));
+          return;
+        }
+        if (forcedCancellation_ && cancellationRequested_)
+        {
+          terminalEmitted_ = true;
+          emit owner_->cancelled({
+            request_.jobId,
+            cancellationReason_,
+            lastStage_,
+            true,
+          });
           return;
         }
         if (exitStatus != QProcess::NormalExit || exitCode != 0)
@@ -118,6 +132,18 @@ public:
             exitCode));
           return;
         }
+        if (pendingCancellation_)
+        {
+          terminalEmitted_ = true;
+          emit owner_->cancelled(*pendingCancellation_);
+          return;
+        }
+        if (cancellationRequested_)
+        {
+          fail(protocolFailure(
+            "Worker exited successfully without a cancelled message"));
+          return;
+        }
         if (!pendingResult_)
         {
           fail(protocolFailure("Worker exited successfully without a result message"));
@@ -125,6 +151,18 @@ public:
         }
         terminalEmitted_ = true;
         emit owner_->succeeded(*pendingResult_);
+      });
+    QObject::connect(&cancellationDeadline_, &QTimer::timeout,
+      owner_, [this] {
+        if (!terminalEmitted_ && cancellationRequested_
+          && process_.state() != QProcess::NotRunning)
+        {
+          // Qt documents kill() as the reliable immediate termination path
+          // for Windows console processes.
+          // https://doc.qt.io/qt-6.8/qprocess.html#kill
+          forcedCancellation_ = true;
+          process_.kill();
+        }
       });
   }
 
@@ -168,9 +206,16 @@ public:
     outputBuffer_.clear();
     errorOutput_.clear();
     pendingResult_.reset();
+    pendingCancellation_.reset();
     lastStage_ = "initializing";
     helloReceived_ = false;
     terminalEmitted_ = false;
+    cancellationRequested_ = false;
+    cancellationAcknowledged_ = false;
+    forcedCancellation_ = false;
+    cancellationReason_.clear();
+    cancellationDeadlineUtc_.clear();
+    cancellationDeadline_.stop();
 
     process_.setWorkingDirectory(request.workspace);
     process_.setProcessChannelMode(QProcess::SeparateChannels);
@@ -180,9 +225,44 @@ public:
     return std::nullopt;
   }
 
+  std::optional<GmshWorkerFailure> cancel(
+    const QString& reason,
+    int deadlineMilliseconds)
+  {
+    const QString cleanReason = reason.trimmed();
+    if (process_.state() == QProcess::NotRunning
+      || terminalEmitted_ || pendingResult_ || cancellationRequested_
+      || cleanReason.isEmpty() || cleanReason.size() > 256
+      || deadlineMilliseconds <= 0 || deadlineMilliseconds > 60'000)
+    {
+      return makeFailure(
+        GmshWorkerFailureKind::InvalidRequest,
+        "MESH_INPUT_INVALID",
+        lastStage_,
+        "Cancellation requires one active job, a bounded reason, and a valid deadline");
+    }
+
+    cancellationRequested_ = true;
+    cancellationReason_ = cleanReason;
+    cancellationDeadlineUtc_ = QDateTime::currentDateTimeUtc()
+      .addMSecs(deadlineMilliseconds)
+      .toString(Qt::ISODateWithMs);
+    cancellationDeadline_.start(deadlineMilliseconds);
+    if (helloReceived_)
+    {
+      sendCancel();
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] bool isRunning() const noexcept
   {
     return process_.state() != QProcess::NotRunning;
+  }
+
+  [[nodiscard]] bool isCancelling() const noexcept
+  {
+    return cancellationRequested_ && !terminalEmitted_;
   }
 
 private:
@@ -284,6 +364,10 @@ private:
       }
       helloReceived_ = true;
       sendHelloAck();
+      if (!terminalEmitted_ && cancellationRequested_)
+      {
+        sendCancel();
+      }
       return !terminalEmitted_;
     }
 
@@ -292,13 +376,46 @@ private:
       fail(protocolFailure("Worker message job ID does not match the active job"));
       return false;
     }
-    if (pendingResult_)
+    if (pendingResult_ || pendingCancellation_)
     {
       fail(protocolFailure("Worker emitted a message after its terminal result"));
       return false;
     }
 
     const QJsonObject payload = message.value("payload").toObject();
+    if (type == "cancelAck")
+    {
+      if (!cancellationRequested_ || cancellationAcknowledged_
+        || payload.value("reason").toString() != cancellationReason_
+        || payload.value("deadlineUtc").toString() != cancellationDeadlineUtc_)
+      {
+        fail(protocolFailure("Worker cancellation acknowledgement is invalid"));
+        return false;
+      }
+      cancellationAcknowledged_ = true;
+      return true;
+    }
+
+    if (type == "cancelled")
+    {
+      const QString stage = payload.value("stage").toString();
+      if (!cancellationRequested_ || !cancellationAcknowledged_
+        || payload.value("reason").toString() != cancellationReason_
+        || stage.isEmpty() || payload.value("forced").toBool(true))
+      {
+        fail(protocolFailure("Worker cancelled payload is invalid"));
+        return false;
+      }
+      lastStage_ = stage;
+      pendingCancellation_ = GmshWorkerCancellation{
+        request_.jobId,
+        cancellationReason_,
+        stage,
+        false,
+      };
+      return true;
+    }
+
     if (type == "progress")
     {
       const QString stage = payload.value("stage").toString();
@@ -342,6 +459,11 @@ private:
 
     if (type == "result")
     {
+      if (cancellationRequested_)
+      {
+        fail(protocolFailure("Worker published a result after cancellation"));
+        return false;
+      }
       const qint64 revision = payload.value("sourceGeometryRevision").toInteger(-1);
       const qint64 nodes = payload.value("nodeCount").toInteger(-1);
       const qint64 triangles = payload.value("triangleCount").toInteger(-1);
@@ -397,6 +519,30 @@ private:
     }
   }
 
+  void sendCancel()
+  {
+    const QJsonObject message{
+      {"type", "cancel"},
+      {"protocol", QJsonObject{{"major", ProtocolMajor}, {"minor", ProtocolMinor}}},
+      {"messageId", "main-cancel-1"},
+      {"jobId", request_.jobId},
+      {"timestampUtc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+      {"payload", QJsonObject{
+        {"reason", cancellationReason_},
+        {"deadlineUtc", cancellationDeadlineUtc_},
+      }},
+    };
+    const QByteArray line = QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n';
+    if (process_.write(line) != line.size())
+    {
+      fail(makeFailure(
+        GmshWorkerFailureKind::WorkerLost,
+        "MESH_WORKER_LOST",
+        lastStage_,
+        "Cannot write cancel to the Worker"));
+    }
+  }
+
   void fail(GmshWorkerFailure failure)
   {
     if (terminalEmitted_)
@@ -404,6 +550,7 @@ private:
       return;
     }
     terminalEmitted_ = true;
+    cancellationDeadline_.stop();
     if (process_.state() != QProcess::NotRunning)
     {
       process_.kill();
@@ -413,13 +560,20 @@ private:
 
   GmshWorkerClient* owner_ = nullptr;
   QProcess process_;
+  QTimer cancellationDeadline_;
   GmshWorkerLaunchRequest request_;
   QByteArray outputBuffer_;
   QByteArray errorOutput_;
   std::optional<GmshWorkerResult> pendingResult_;
+  std::optional<GmshWorkerCancellation> pendingCancellation_;
   QString lastStage_;
   bool helloReceived_ = false;
   bool terminalEmitted_ = false;
+  bool cancellationRequested_ = false;
+  bool cancellationAcknowledged_ = false;
+  bool forcedCancellation_ = false;
+  QString cancellationReason_;
+  QString cancellationDeadlineUtc_;
 };
 
 GmshWorkerClient::GmshWorkerClient(QObject* parent)
@@ -436,8 +590,20 @@ std::optional<GmshWorkerFailure> GmshWorkerClient::start(
   return implementation_->start(request);
 }
 
+std::optional<GmshWorkerFailure> GmshWorkerClient::cancel(
+  const QString& reason,
+  int deadlineMilliseconds)
+{
+  return implementation_->cancel(reason, deadlineMilliseconds);
+}
+
 bool GmshWorkerClient::isRunning() const noexcept
 {
   return implementation_->isRunning();
+}
+
+bool GmshWorkerClient::isCancelling() const noexcept
+{
+  return implementation_->isCancelling();
 }
 }

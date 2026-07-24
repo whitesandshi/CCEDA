@@ -4,8 +4,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QThread>
 #include <QTimer>
 
 #include <cstdio>
@@ -69,6 +71,7 @@ struct RunOutcome
   bool timedOut = false;
   std::optional<cceda::meshing::GmshWorkerResult> result;
   std::optional<cceda::meshing::GmshWorkerFailure> failure;
+  std::optional<cceda::meshing::GmshWorkerCancellation> cancellation;
   QStringList stages;
 };
 
@@ -92,6 +95,11 @@ RunOutcome runClient(const cceda::meshing::GmshWorkerLaunchRequest& request)
   QObject::connect(&client, &cceda::meshing::GmshWorkerClient::failed,
     &loop, [&](const cceda::meshing::GmshWorkerFailure& failure) {
       outcome.failure = failure;
+      loop.quit();
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::cancelled,
+    &loop, [&](const cceda::meshing::GmshWorkerCancellation& cancellation) {
+      outcome.cancellation = cancellation;
       loop.quit();
     });
   QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
@@ -139,6 +147,80 @@ int runIncompatibleWorker()
   std::fflush(stdout);
   return 0;
 }
+
+int runCancellationIgnoringWorker()
+{
+  const QJsonObject hello{
+    {"type", "hello"},
+    {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
+    {"messageId", "fake-1"},
+    {"jobId", ""},
+    {"timestampUtc", "2026-07-24T00:00:00.000Z"},
+    {"payload", QJsonObject{
+      {"workerVersion", "fake"},
+      {"buildId", "fake"},
+      {"backendId", "gmsh"},
+      {"backendVersion", "fake"},
+      {"capabilities", QJsonObject{
+        {"dimensions", QJsonArray{3}},
+        {"elementTypes", QJsonArray{"Triangle3", "Tetrahedron4"}},
+        {"modes", QJsonArray{"independent-solids"}},
+      }},
+    }},
+  };
+  const QByteArray line = QJsonDocument(hello).toJson(QJsonDocument::Compact) + '\n';
+  std::fwrite(line.constData(), 1, static_cast<std::size_t>(line.size()), stdout);
+  std::fflush(stdout);
+  QThread::msleep(10'000);
+  return 0;
+}
+
+RunOutcome runForcedCancellation(
+  const cceda::meshing::GmshWorkerLaunchRequest& request)
+{
+  cceda::meshing::GmshWorkerClient client;
+  QEventLoop loop;
+  QTimer timeout;
+  timeout.setSingleShot(true);
+  RunOutcome outcome;
+
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::succeeded,
+    &loop, [&](const cceda::meshing::GmshWorkerResult& result) {
+      outcome.result = result;
+      loop.quit();
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::failed,
+    &loop, [&](const cceda::meshing::GmshWorkerFailure& failure) {
+      outcome.failure = failure;
+      loop.quit();
+    });
+  QObject::connect(&client, &cceda::meshing::GmshWorkerClient::cancelled,
+    &loop, [&](const cceda::meshing::GmshWorkerCancellation& cancellation) {
+      outcome.cancellation = cancellation;
+      loop.quit();
+    });
+  QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+    outcome.timedOut = true;
+    loop.quit();
+  });
+
+  if (const auto startFailure = client.start(request))
+  {
+    outcome.failure = startFailure;
+    return outcome;
+  }
+  QTimer::singleShot(50, &loop, [&] {
+    const auto cancelFailure = client.cancel("test cancellation", 100);
+    if (cancelFailure)
+    {
+      outcome.failure = cancelFailure;
+      loop.quit();
+    }
+  });
+  timeout.start(5'000);
+  loop.exec();
+  return outcome;
+}
 }
 
 int main(int argc, char* argv[])
@@ -146,6 +228,10 @@ int main(int argc, char* argv[])
   QCoreApplication application(argc, argv);
   if (argc == 5 && QString::fromLocal8Bit(argv[1]) == "--workspace")
   {
+    if (QString::fromLocal8Bit(argv[2]).contains("force-cancel"))
+    {
+      return runCancellationIgnoringWorker();
+    }
     return runIncompatibleWorker();
   }
   if (!expect(argc == 4, "expected Worker, Gmsh, and STEP paths"))
@@ -230,6 +316,34 @@ int main(int argc, char* argv[])
     || !expect(stale.failure.has_value(), "revision mismatch did not fail")
     || !expect(stale.failure->kind == cceda::meshing::GmshWorkerFailureKind::ProtocolError,
       "revision mismatch must be a protocol failure"))
+  {
+    return 1;
+  }
+
+  TestWorkspace forceCancelWorkspace("force-cancel");
+  if (!expect(forceCancelWorkspace.isValid(), "force-cancel workspace is unavailable")
+    || !expect(writeRequest(forceCancelWorkspace.path(), stepPath, 17),
+      "cannot write the force-cancel request"))
+  {
+    return 1;
+  }
+  const RunOutcome forceCancelled = runForcedCancellation({
+    QCoreApplication::applicationFilePath(),
+    gmshPath,
+    forceCancelWorkspace.path(),
+    "worker-client-test",
+    17,
+    "client-tests",
+  });
+  if (!expect(!forceCancelled.timedOut, "forced cancellation timed out")
+    || !expect(!forceCancelled.result.has_value(), "forced cancellation published a result")
+    || !expect(!forceCancelled.failure.has_value(), "forced cancellation reported failure")
+    || !expect(forceCancelled.cancellation.has_value(),
+      "forced cancellation did not publish its terminal state")
+    || !expect(forceCancelled.cancellation->forced,
+      "deadline cancellation should be marked forced")
+    || !expect(forceCancelled.cancellation->reason == "test cancellation",
+      "cancellation reason did not round-trip"))
   {
     return 1;
   }

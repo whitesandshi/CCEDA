@@ -37,6 +37,14 @@ struct GmshWorkerResult
   std::uint64_t tetrahedronCount = 0;
 };
 
+struct GmshWorkerCancellation
+{
+  QString jobId;
+  QString reason;
+  QString stage;
+  bool forced = false;
+};
+
 enum class GmshWorkerFailureKind
 {
   InvalidRequest,
@@ -65,11 +73,16 @@ public:
 
   [[nodiscard]] std::optional<GmshWorkerFailure> start(
     const GmshWorkerLaunchRequest& request);
+  [[nodiscard]] std::optional<GmshWorkerFailure> cancel(
+    const QString& reason,
+    int deadlineMilliseconds);
   [[nodiscard]] bool isRunning() const noexcept;
+  [[nodiscard]] bool isCancelling() const noexcept;
 
 signals:
   void progressChanged(const cceda::meshing::GmshWorkerProgress& progress);
   void succeeded(const cceda::meshing::GmshWorkerResult& result);
+  void cancelled(const cceda::meshing::GmshWorkerCancellation& cancellation);
   void failed(const cceda::meshing::GmshWorkerFailure& failure);
 
 private:
