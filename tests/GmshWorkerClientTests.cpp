@@ -1,10 +1,9 @@
+#include "meshing/GmshExecutableJobWorkspace.h"
 #include "meshing/GmshWorkerClient.h"
 
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QDir>
 #include <QEventLoop>
-#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTimer>
@@ -42,50 +41,27 @@ private:
   bool valid_ = false;
 };
 
-QString sha256(const QString& path)
-{
-  QFile file(path);
-  if (!file.open(QIODevice::ReadOnly))
-  {
-    return {};
-  }
-  QCryptographicHash hash(QCryptographicHash::Sha256);
-  return hash.addData(&file) ? QString::fromLatin1(hash.result().toHex()) : QString{};
-}
-
 bool writeRequest(
   const QString& workspace,
   const QString& sourceStep,
   cceda::domain::GeometryRevision requestRevision)
 {
-  QDir root(workspace);
-  if (!QDir().mkpath(root.filePath("geometry"))
-    || !QDir().mkpath(root.filePath("output"))
-    || !QDir().mkpath(root.filePath("logs")))
+  const cceda::meshing::GmshJobWorkspaceResult result =
+    cceda::meshing::prepareGmshExecutableJobWorkspace({
+      workspace,
+      sourceStep,
+      "worker-client-test",
+      requestRevision,
+      0.0,
+      0.0,
+      4 * 1024 * 1024,
+    });
+  if (!result.succeeded())
   {
-    return false;
+    std::cerr << "Cannot prepare Worker request: "
+              << result.detail.toStdString() << '\n';
   }
-
-  const QString input = root.filePath("geometry/input.step");
-  if (!QFile::copy(sourceStep, input))
-  {
-    return false;
-  }
-
-  const QJsonObject request{
-    {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
-    {"jobId", "worker-client-test"},
-    {"sourceGeometryRevision", static_cast<qint64>(requestRevision)},
-    {"geometry", QJsonObject{{"path", "geometry/input.step"}, {"sha256", sha256(input)}}},
-    {"output", QJsonObject{
-      {"meshPath", "output/gmsh-intermediate.msh"},
-      {"resultPath", "output/result.json"},
-    }},
-    {"settings", QJsonObject{{"minimumSizeMm", 0.0}, {"maximumSizeMm", 0.0}}},
-  };
-  QFile file(root.filePath("request.json"));
-  return file.open(QIODevice::WriteOnly)
-    && file.write(QJsonDocument(request).toJson(QJsonDocument::Indented)) > 0;
+  return result.succeeded();
 }
 
 struct RunOutcome

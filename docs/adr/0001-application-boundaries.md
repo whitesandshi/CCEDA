@@ -35,11 +35,14 @@ ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader tr
 
 The main-side Worker client is a separate QtCore adapter. It owns `QProcess`, treats standard output as untrusted bounded NDJSON, performs the versioned handshake, checks job and source-revision identity, and emits only neutral progress/result/failure DTOs. A result is published only after both a valid result message and normal process exit; process failures never mutate project state.
 
+The current executable adapter has a matching main-side workspace builder. It accepts only an absent or empty absolute workspace, copies a bounded STEP snapshot while computing SHA-256, fixes all relative input/output paths, and atomically publishes `request.json` last. This protocol-0.1 helper is intentionally named for the executable adapter and does not freeze the final BREP, geometry-map, or meshbin formats.
+
 ## Sources
 
 - Qt CMake project setup: https://doc.qt.io/qt-6/cmake-get-started.html
 - Qt main-window framework: https://doc.qt.io/qt-6/qmainwindow.html
 - Qt model/view architecture: https://doc.qt.io/qt-6/model-view-programming.html
 - Qt process lifecycle and channels: https://doc.qt.io/qt-6.8/qprocess.html
+- Qt atomic file replacement: https://doc.qt.io/qt-6.8/qsavefile.html
 - OCCT overview and data-exchange architecture: https://dev.opencascade.org/doc/overview/html/
 - Gmsh reference manual and official API sequence: https://gmsh.info/doc/texinfo/

@@ -45,6 +45,8 @@ target_include_directories(cceda_mesh_gmsh PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(cceda_mesh_gmsh PUBLIC cceda_domain)
 
 add_library(cceda_meshing_worker_client STATIC
+    src/meshing/GmshExecutableJobWorkspace.cpp
+    src/meshing/GmshExecutableJobWorkspace.h
     src/meshing/GmshWorkerClient.cpp
     src/meshing/GmshWorkerClient.h)
 target_include_directories(cceda_meshing_worker_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -183,6 +185,15 @@ if(BUILD_TESTING)
         TIMEOUT 70
         LABELS "integration;meshing"
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
+    add_executable(cceda_gmsh_job_workspace_tests
+        tests/GmshExecutableJobWorkspaceTests.cpp)
+    target_link_libraries(cceda_gmsh_job_workspace_tests PRIVATE
+        Qt6::Core
+        cceda_meshing_worker_client)
+    add_test(
+        NAME meshing.gmsh_job_workspace
+        COMMAND cceda_gmsh_job_workspace_tests)
 
     add_executable(cceda_geometry_import_tests tests/GeometryImportTests.cpp)
     target_link_libraries(cceda_geometry_import_tests PRIVATE

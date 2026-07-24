@@ -11,6 +11,7 @@ CCEDA is a solver-neutral geometry and mesh preprocessing desktop application. T
 - Pan, rotate, zoom, fit, and restore an isometric view.
 - Open a STEP file directly from the command line.
 - Run an experimental isolated Gmsh executable Worker with a bounded versioned handshake.
+- Prepare an isolated executable-adapter job workspace with bounded STEP copying, streaming SHA-256, fixed output paths, and request publication last.
 - Launch that Worker asynchronously from a main-process client that validates control messages, job identity, and geometry revision before publishing a result.
 - Convert bounded ASCII MSH 4.1 output to the neutral mesh contract using stable typed entity mappings.
 - Validate solver-neutral mesh IDs, references, regions, geometry associations, and revision ownership.
@@ -43,6 +44,8 @@ The build deploys the required Qt and OCCT runtime files beside `build-vs2022\Re
 The product contract is in [`docs/spec`](docs/spec/README.md), and architectural decisions are in [`docs/adr`](docs/adr). The original Win32 integration spike is preserved in [`prototype/win32`](prototype/win32).
 
 The first Gmsh Worker slice uses an explicitly bounded executable adapter because the installed Gmsh build has no linkable C++ SDK. Its process test covers protocol-major rejection, workspace and input-hash validation, real STEP volume meshing, ASCII MSH 4.1 inspection, and atomic publication of an experimental intermediate result.
+
+The main process prepares each executable-adapter workspace from an empty directory, copies the STEP snapshot through a caller-provided byte budget while computing SHA-256, creates only the controlled geometry/output/log directories, and publishes `request.json` last with an atomic save.
 
 The main-process Worker client uses asynchronous Qt process I/O, validates every newline-delimited control message against the protocol envelope, sends the versioned handshake, and publishes success only after a matching geometry revision and normal Worker exit. Its integration test exercises the real local Worker/Gmsh path and rejects a stale result revision.
 
