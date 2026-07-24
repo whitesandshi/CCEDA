@@ -7,6 +7,7 @@ CCEDA is a solver-neutral geometry and mesh preprocessing desktop application. T
 - Open `.step` and `.stp` files asynchronously.
 - Preserve the XCAF assembly hierarchy, names, colors, and placements.
 - Inspect solid, face, edge, vertex, volume, validity, and meshability counts.
+- Create a revision-bound independent-Solid OCCT BREP snapshot with a versioned geometry map and SHA-256 digests.
 - Select tree entities and highlight the corresponding shape.
 - Pan, rotate, zoom, fit, and restore an isometric view.
 - Open a STEP file directly from the command line.
@@ -55,4 +56,6 @@ The domain now defines a storage-neutral `MeshModel` and validates Worker-versus
 
 `ProjectState` owns the current neutral mesh, preserves stale meshes for inspection after geometry changes, rejects invalid or obsolete Worker artifacts without changing project state, and assigns monotonically increasing positive mesh revisions only on successful commit.
 
-This is not yet the product mesh pipeline. The intermediate `.msh` is marked experimental and is not committed as a domain mesh. Versioned `geometry-map.json` ingestion, neutral `result.meshbin` serialization, quality evaluation, cancellation, Worker resource enforcement, and UI task submission remain future slices.
+The geometry adapter now creates protocol-0.1 independent-Solid snapshots from one atomic repository revision. It writes only valid meshable Solids to `input.brep`, assigns deterministic snapshot region IDs, records Assembly/Part/Solid/Face IDs and OCCT location matrices in `geometry-map.json`, bounds the combined artifacts, and returns SHA-256 for both files without mutating canonical XCAF geometry. Shape locations are preserved but explicitly marked as not baked.
+
+This is not yet the product mesh pipeline. The intermediate `.msh` is marked experimental and is not committed as a domain mesh. Worker-side `geometry-map.json` consumption and Gmsh-tag reconciliation, neutral `result.meshbin` serialization, quality evaluation, resource enforcement, and UI task submission remain future slices.

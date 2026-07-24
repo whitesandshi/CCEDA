@@ -25,15 +25,19 @@ The UI can evolve without owning OCCT topology objects, and a failing mesher can
 
 The first Worker slice uses the explicitly documented executable-based adapter because the local Gmsh build has no linkable SDK. It establishes process isolation, protocol-major rejection, bounded request validation, real STEP meshing, and experimental intermediate-result verification.
 
-The adapter does not make Gmsh `.msh` a domain format. The bounded MSH reader now converts validated output to the neutral mesh contract when the caller supplies stable typed associations. Versioned association-file ingestion, quality evaluation, and cancellation/resource enforcement remain required before the main application can commit a real Worker result.
+The adapter does not make Gmsh `.msh` a domain format. The bounded MSH reader now converts validated output to the neutral mesh contract when the caller supplies stable typed associations. Worker-side input-map consumption, versioned result-map ingestion, quality evaluation, and resource enforcement remain required before the main application can commit a real Worker result.
 
-The neutral `MeshModel` and its structural validator live in the dependency-free domain layer. Binary alignment, compression, block checksums, and geometry-map serialization remain deliberately unfrozen and are not encoded by the domain model.
+The neutral `MeshModel` and its structural validator live in the dependency-free domain layer. Binary alignment, compression, block checksums, and result-map serialization remain deliberately unfrozen and are not encoded by the domain model.
 
 The project aggregate owns at most one current neutral mesh. It accepts only a structurally valid uncommitted Worker artifact for the exact current `GeometryRevision`, assigns the next positive `MeshRevision`, and replaces the previous mesh only after every check succeeds. Geometry changes retain that mesh for inspection but mark it stale and non-exportable.
 
-ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader treats Worker output as untrusted, requires caller-provided byte/count limits, validates the complete low-order Gmsh topology, and removes Gmsh entity tags while applying typed stable entity/region mappings. The typed mapping contract deliberately does not freeze the pending `geometry-map.json` storage schema.
+ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader treats Worker output as untrusted, requires caller-provided byte/count limits, validates the complete low-order Gmsh topology, and removes Gmsh entity tags while applying typed stable entity/region mappings. Connecting those mappings to the protocol-0.1 input map still requires explicit Worker-side Gmsh tag reconciliation.
 
-The OCCT importer treats XCAF leaves as Parts and indexes their unique Solid, Face, Edge, and Vertex topology with opaque IDs scoped to one `GeometryRevision`. The OCCT repository retains the reverse ID-to-shape association and rejects lookups for a different revision; `TopoDS_Shape` remains inside the geometry adapter. These IDs establish the geometry side of a future meshing snapshot but do not imply any relation to Gmsh entity tags or freeze an association-file format.
+The OCCT importer treats XCAF leaves as Parts and indexes their unique Solid, Face, Edge, and Vertex topology with opaque IDs scoped to one `GeometryRevision`. The OCCT repository retains the reverse ID-to-shape association and rejects lookups for a different revision; `TopoDS_Shape` remains inside the geometry adapter. These IDs do not imply any relation to Gmsh entity tags.
+
+`IGeometrySnapshotService` defines the standard-library-only port for protocol-0.1 independent-Solid snapshots. Its OCCT adapter captures the domain document and topology map under one repository lock, includes every valid meshable Solid exactly once in an OCCT BREP compound, excludes non-solid Parts and invalid Solids, and never mutates canonical XCAF geometry. `geometry-map.json` assigns deterministic positive region and BREP Solid indexes; retains source Assembly, Part, Solid, and Face IDs; records shared-Face candidates; and carries a row-major location matrix for each region. Locations are preserved in BREP and therefore declared `transformsBaked: false`, rather than being misrepresented as physically baked geometry.
+
+Snapshot publication accepts only an absolute absent-or-empty output directory and a caller byte budget. BREP is written without triangulation to a same-directory temporary file, hashed by streaming SHA-256, and renamed only after the versioned JSON map fits the remaining budget. The JSON map is atomically committed last; scoped cleanup removes the BREP on every failure path. Both final byte digests are returned to the caller for later `request.json` sealing. The 0.1 input-map schema does not claim that the executable Gmsh adapter can yet recover stable source IDs from imported Gmsh tags.
 
 The main-side Worker client is a separate QtCore adapter. It owns `QProcess`, treats standard output as untrusted bounded NDJSON, performs the versioned handshake, checks job and source-revision identity, and emits only neutral progress/result/failure DTOs. A result is published only after both a valid result message and normal process exit; process failures never mutate project state.
 
@@ -51,7 +55,9 @@ Cancellation is an explicit application and protocol state rather than a generic
 - Qt process lifecycle and channels: https://doc.qt.io/qt-6.8/qprocess.html
 - Qt single-shot cancellation deadlines: https://doc.qt.io/qt-6.8/qtimer.html
 - Qt atomic file replacement: https://doc.qt.io/qt-6.8/qsavefile.html
+- Qt cryptographic hashes: https://doc.qt.io/qt-6.8/qcryptographichash.html
 - Qt concurrent function execution: https://doc.qt.io/qt-6.8/qtconcurrentrun.html
 - Qt future completion monitoring: https://doc.qt.io/qt-6.8/qfuturewatcher.html
 - OCCT overview and data-exchange architecture: https://dev.opencascade.org/doc/overview/html/
+- OCCT BREP read/write tools: https://dev.opencascade.org/doc/refman/html/class_b_rep_tools.html
 - Gmsh reference manual and official API sequence: https://gmsh.info/doc/texinfo/

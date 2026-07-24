@@ -34,6 +34,13 @@ struct OccShapeLookupResult
   TopoDS_Shape shape;
 };
 
+struct OccTopologySnapshot
+{
+  OccShapeLookupStatus status = OccShapeLookupStatus::NotFound;
+  domain::GeometryDocument document;
+  std::unordered_map<std::string, TopoDS_Shape> topologyShapes;
+};
+
 class OccGeometryRepository
 {
 public:
@@ -48,6 +55,8 @@ public:
   [[nodiscard]] OccShapeLookupResult lookupTopologyShape(
     domain::GeometryRevision revision,
     const std::string& geometryId) const;
+  [[nodiscard]] OccTopologySnapshot topologySnapshot(
+    domain::GeometryRevision revision) const;
 
 private:
   mutable std::mutex mutex_;

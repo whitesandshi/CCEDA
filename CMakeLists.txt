@@ -62,11 +62,12 @@ target_link_libraries(cceda_application
 
 add_library(cceda_geometry_occ STATIC
     src/geometry/OccGeometryRepository.cpp
-    src/geometry/OccGeometryService.cpp)
+    src/geometry/OccGeometryService.cpp
+    src/geometry/OccGeometrySnapshotService.cpp)
 target_include_directories(cceda_geometry_occ PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_geometry_occ
     PUBLIC cceda_domain
-    PRIVATE TKDESTEP TKXCAF TKVCAF TKCAF TKLCAF TKCDF TKBRep TKTopAlgo TKG3d TKGeomBase TKMath TKernel)
+    PRIVATE Qt6::Core TKDESTEP TKXCAF TKVCAF TKCAF TKLCAF TKCDF TKBRep TKTopAlgo TKG3d TKGeomBase TKMath TKernel)
 set_property(TARGET cceda_geometry_occ PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(cceda_visualization_occ STATIC
@@ -235,11 +236,27 @@ if(BUILD_TESTING)
                 "D:/Projects/OpenCASCADE-8.0.0/install/data/step/screw.step")
     set_tests_properties(geometry.import_step PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${OpenCASCADE_BINARY_DIR}")
+
+    add_executable(cceda_geometry_snapshot_tests
+        tests/GeometrySnapshotTests.cpp)
+    target_link_libraries(cceda_geometry_snapshot_tests PRIVATE
+        Qt6::Core
+        cceda_geometry_occ
+        TKTopAlgo
+        TKBRep)
+    set_property(TARGET cceda_geometry_snapshot_tests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+    add_test(
+        NAME geometry.meshing_snapshot
+        COMMAND cceda_geometry_snapshot_tests
+                "D:/Projects/OpenCASCADE-8.0.0/install/data/step/screw.step")
+    set_tests_properties(geometry.meshing_snapshot PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${OpenCASCADE_BINARY_DIR}")
     set_target_properties(
         cceda_domain_tests
         cceda_mesh_model_tests
         cceda_gmsh_msh41_reader_tests
         cceda_geometry_import_tests
+        cceda_geometry_snapshot_tests
         PROPERTIES
         FOLDER "Tests")
 endif()

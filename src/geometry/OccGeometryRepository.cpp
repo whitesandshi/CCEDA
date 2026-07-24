@@ -50,4 +50,15 @@ OccShapeLookupResult OccGeometryRepository::lookupTopologyShape(
   }
   return {OccShapeLookupStatus::Found, shape->second};
 }
+
+OccTopologySnapshot OccGeometryRepository::topologySnapshot(
+  domain::GeometryRevision revision) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (revision != domainDocument_.revision)
+  {
+    return {OccShapeLookupStatus::RevisionMismatch, {}, {}};
+  }
+  return {OccShapeLookupStatus::Found, domainDocument_, topologyShapes_};
+}
 }
