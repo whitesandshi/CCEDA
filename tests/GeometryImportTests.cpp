@@ -19,8 +19,12 @@ struct TopologySummary
 {
   std::size_t solids = 0;
   std::size_t faces = 0;
+  std::size_t edges = 0;
+  std::size_t vertices = 0;
   bool uniqueIds = true;
   bool faceParentsAreSolids = true;
+  bool edgeParentsAreFaces = true;
+  bool vertexParentsAreEdges = true;
   std::unordered_set<std::string> ids;
 };
 
@@ -43,17 +47,38 @@ TopologySummary summarizeTopology(const cceda::domain::GeometryDocument& documen
       summary.ids.insert(entity.id);
       ++summary.faces;
     }
+    else if (entity.kind == cceda::domain::GeometryKind::Edge)
+    {
+      summary.ids.insert(entity.id);
+      ++summary.edges;
+    }
+    else if (entity.kind == cceda::domain::GeometryKind::Vertex)
+    {
+      summary.ids.insert(entity.id);
+      ++summary.vertices;
+    }
   }
   for (const cceda::domain::GeometryEntity& entity : document.entities)
   {
-    if (entity.kind != cceda::domain::GeometryKind::Face)
-    {
-      continue;
-    }
     const auto parent = kindsById.find(entity.parentId);
-    summary.faceParentsAreSolids = parent != kindsById.end()
-      && parent->second == cceda::domain::GeometryKind::Solid
-      && summary.faceParentsAreSolids;
+    if (entity.kind == cceda::domain::GeometryKind::Face)
+    {
+      summary.faceParentsAreSolids = parent != kindsById.end()
+        && parent->second == cceda::domain::GeometryKind::Solid
+        && summary.faceParentsAreSolids;
+    }
+    else if (entity.kind == cceda::domain::GeometryKind::Edge)
+    {
+      summary.edgeParentsAreFaces = parent != kindsById.end()
+        && parent->second == cceda::domain::GeometryKind::Face
+        && summary.edgeParentsAreFaces;
+    }
+    else if (entity.kind == cceda::domain::GeometryKind::Vertex)
+    {
+      summary.vertexParentsAreEdges = parent != kindsById.end()
+        && parent->second == cceda::domain::GeometryKind::Edge
+        && summary.vertexParentsAreEdges;
+    }
   }
   return summary;
 }
@@ -96,9 +121,13 @@ int main(int argc, char** argv)
 
   const TopologySummary topology = summarizeTopology(result.document);
   if (!topology.uniqueIds || topology.solids != result.document.solidCount
-      || topology.faces != result.document.faceCount || !topology.faceParentsAreSolids)
+      || topology.faces != result.document.faceCount
+      || topology.edges != result.document.edgeCount
+      || topology.vertices != result.document.vertexCount
+      || !topology.faceParentsAreSolids || !topology.edgeParentsAreFaces
+      || !topology.vertexParentsAreEdges)
   {
-    std::cerr << "Imported Solid/Face topology is not indexed by unique domain IDs.\n";
+    std::cerr << "Imported topology is not indexed by unique domain IDs.\n";
     return 1;
   }
 
@@ -106,13 +135,26 @@ int main(int argc, char** argv)
   for (const cceda::domain::GeometryEntity& entity : result.document.entities)
   {
     if (entity.kind != cceda::domain::GeometryKind::Solid
-        && entity.kind != cceda::domain::GeometryKind::Face)
+        && entity.kind != cceda::domain::GeometryKind::Face
+        && entity.kind != cceda::domain::GeometryKind::Edge
+        && entity.kind != cceda::domain::GeometryKind::Vertex)
     {
       continue;
     }
     const auto lookup = repository->lookupTopologyShape(result.document.revision, entity.id);
-    const TopAbs_ShapeEnum expectedType = entity.kind == cceda::domain::GeometryKind::Solid
-      ? TopAbs_SOLID : TopAbs_FACE;
+    TopAbs_ShapeEnum expectedType = TopAbs_VERTEX;
+    if (entity.kind == cceda::domain::GeometryKind::Solid)
+    {
+      expectedType = TopAbs_SOLID;
+    }
+    else if (entity.kind == cceda::domain::GeometryKind::Face)
+    {
+      expectedType = TopAbs_FACE;
+    }
+    else if (entity.kind == cceda::domain::GeometryKind::Edge)
+    {
+      expectedType = TopAbs_EDGE;
+    }
     if (lookup.status != cceda::geometry::OccShapeLookupStatus::Found
         || lookup.shape.IsNull() || lookup.shape.ShapeType() != expectedType)
     {
@@ -146,6 +188,8 @@ int main(int argc, char** argv)
       || !repeatedTopology.uniqueIds
       || repeatedTopology.solids != repeated.document.solidCount
       || repeatedTopology.faces != repeated.document.faceCount
+      || repeatedTopology.edges != repeated.document.edgeCount
+      || repeatedTopology.vertices != repeated.document.vertexCount
       || revisionsShareTopologyIds
       || repository->lookupTopologyShape(
         repeated.document.revision, indexedGeometryId).status
@@ -172,7 +216,9 @@ int main(int argc, char** argv)
   const TopologySummary surfaceTopology = summarizeTopology(surfaceResult.document);
   if (!surfaceResult.success || surfaceResult.document.solidCount != 0
       || surfaceResult.document.faceCount == 0 || surfaceTopology.solids != 0
-      || surfaceTopology.faces != surfaceResult.document.faceCount)
+      || surfaceTopology.faces != surfaceResult.document.faceCount
+      || surfaceTopology.edges != surfaceResult.document.edgeCount
+      || surfaceTopology.vertices != surfaceResult.document.vertexCount)
   {
     std::cerr << "A surface-only STEP model must remain inspectable.\n";
     return 1;

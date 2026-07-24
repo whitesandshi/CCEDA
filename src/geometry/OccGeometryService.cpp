@@ -32,6 +32,9 @@ namespace
 namespace domain = cceda::domain;
 using cceda::domain::GeometryEntity;
 using cceda::domain::GeometryKind;
+using ShapeAncestors = NCollection_IndexedDataMap<TopoDS_Shape,
+  NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
+using ShapeMap = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
 
 std::size_t uniqueSubshapeCount(const TopoDS_Shape& shape, TopAbs_ShapeEnum kind)
 {
@@ -138,15 +141,38 @@ GeometryEntity makeTopologyEntity(const TopoDS_Shape& shape,
   return entity;
 }
 
-void appendSolidAndFaceEntities(domain::GeometryDocument& document,
-                                const GeometryEntity& owner,
-                                const TopoDS_Shape& shape,
-                                std::unordered_map<std::string, TopoDS_Shape>& topologyShapes)
+std::string firstAncestorId(const TopoDS_Shape& shape,
+                            const ShapeAncestors& ancestors,
+                            const ShapeMap& parentShapes,
+                            const std::vector<std::string>& parentIds,
+                            const std::string& fallback)
 {
-  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> solids;
-  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> faces;
+  if (!ancestors.Contains(shape))
+  {
+    return fallback;
+  }
+  const NCollection_List<TopoDS_Shape>& candidates = ancestors.FindFromKey(shape);
+  if (candidates.IsEmpty())
+  {
+    return fallback;
+  }
+  const int parentIndex = parentShapes.FindIndex(candidates.First());
+  return parentIndex > 0 ? parentIds[static_cast<std::size_t>(parentIndex)] : fallback;
+}
+
+void appendTopologyEntities(domain::GeometryDocument& document,
+                            const GeometryEntity& owner,
+                            const TopoDS_Shape& shape,
+                            std::unordered_map<std::string, TopoDS_Shape>& topologyShapes)
+{
+  ShapeMap solids;
+  ShapeMap faces;
+  ShapeMap edges;
+  ShapeMap vertices;
   TopExp::MapShapes(shape, TopAbs_SOLID, solids);
   TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
 
   std::vector<std::string> solidIds(static_cast<std::size_t>(solids.Extent()) + 1);
   for (int index = 1; index <= solids.Extent(); ++index)
@@ -164,34 +190,58 @@ void appendSolidAndFaceEntities(domain::GeometryDocument& document,
       owner.color));
   }
 
-  NCollection_IndexedDataMap<TopoDS_Shape,
-    NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher> faceAncestors;
+  ShapeAncestors faceAncestors;
   TopExp::MapShapesAndAncestors(shape, TopAbs_FACE, TopAbs_SOLID, faceAncestors);
+  std::vector<std::string> faceIds(static_cast<std::size_t>(faces.Extent()) + 1);
   for (int index = 1; index <= faces.Extent(); ++index)
   {
     const TopoDS_Shape& face = faces.FindKey(index);
-    std::string parentId = owner.id;
-    if (faceAncestors.Contains(face))
-    {
-      const NCollection_List<TopoDS_Shape>& ancestors =
-        faceAncestors.FindFromKey(face);
-      if (!ancestors.IsEmpty())
-      {
-        const int solidIndex = solids.FindIndex(ancestors.First());
-        if (solidIndex > 0)
-        {
-          parentId = solidIds[static_cast<std::size_t>(solidIndex)];
-        }
-      }
-    }
+    std::string parentId = firstAncestorId(
+      face, faceAncestors, solids, solidIds, owner.id);
+    faceIds[static_cast<std::size_t>(index)] =
+      topologyId(document.revision, owner.id, "face", index);
     document.entities.push_back(makeTopologyEntity(
       face,
       GeometryKind::Face,
-      topologyId(document.revision, owner.id, "face", index),
+      faceIds[static_cast<std::size_t>(index)],
       std::move(parentId),
       "Face " + std::to_string(index),
       owner.color));
     topologyShapes.emplace(document.entities.back().id, face);
+  }
+
+  ShapeAncestors edgeAncestors;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeAncestors);
+  std::vector<std::string> edgeIds(static_cast<std::size_t>(edges.Extent()) + 1);
+  for (int index = 1; index <= edges.Extent(); ++index)
+  {
+    const TopoDS_Shape& edge = edges.FindKey(index);
+    edgeIds[static_cast<std::size_t>(index)] =
+      topologyId(document.revision, owner.id, "edge", index);
+    document.entities.push_back(makeTopologyEntity(
+      edge,
+      GeometryKind::Edge,
+      edgeIds[static_cast<std::size_t>(index)],
+      firstAncestorId(edge, edgeAncestors, faces, faceIds, owner.id),
+      "Edge " + std::to_string(index),
+      owner.color));
+    topologyShapes.emplace(document.entities.back().id, edge);
+  }
+
+  ShapeAncestors vertexAncestors;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertexAncestors);
+  for (int index = 1; index <= vertices.Extent(); ++index)
+  {
+    const TopoDS_Shape& vertex = vertices.FindKey(index);
+    const std::string id = topologyId(document.revision, owner.id, "vertex", index);
+    document.entities.push_back(makeTopologyEntity(
+      vertex,
+      GeometryKind::Vertex,
+      id,
+      firstAncestorId(vertex, vertexAncestors, edges, edgeIds, owner.id),
+      "Vertex " + std::to_string(index),
+      owner.color));
+    topologyShapes.emplace(id, vertex);
   }
 }
 }
@@ -274,7 +324,7 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
         domainDocument.faceCount += entity.faceCount;
         domainDocument.edgeCount += entity.edgeCount;
         domainDocument.vertexCount += entity.vertexCount;
-        appendSolidAndFaceEntities(domainDocument, entity, shape, topologyShapes);
+        appendTopologyEntities(domainDocument, entity, shape, topologyShapes);
 
         OccShapeRecord record;
         record.id = entity.id;
