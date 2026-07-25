@@ -471,12 +471,16 @@ private:
       const qint64 tetrahedra = payload.value("tetrahedronCount").toInteger(-1);
       const QString resultPath = payload.value("resultPath").toString();
       const QString meshSha256 = payload.value("meshSha256").toString();
+      const QString geometryMapResultSha256 =
+        payload.value("geometryMapResultSha256").toString();
       if (revision <= 0
         || static_cast<domain::GeometryRevision>(revision)
           != request_.sourceGeometryRevision
         || nodes <= 0 || triangles <= 0 || tetrahedra <= 0
         || !isRelativeWorkspacePath(resultPath)
-        || !isSha256(meshSha256))
+        || !isSha256(meshSha256)
+        || (payload.contains("geometryMapResultSha256")
+          && !isSha256(geometryMapResultSha256)))
       {
         fail(protocolFailure("Worker result payload or geometry revision is invalid"));
         return false;
@@ -485,6 +489,7 @@ private:
         static_cast<domain::GeometryRevision>(revision),
         resultPath,
         meshSha256,
+        geometryMapResultSha256,
         static_cast<std::uint64_t>(nodes),
         static_cast<std::uint64_t>(triangles),
         static_cast<std::uint64_t>(tetrahedra),

@@ -1,3 +1,6 @@
+#include "geometry/OccGeometryRepository.h"
+#include "geometry/OccGeometryService.h"
+#include "geometry/OccGeometrySnapshotService.h"
 #include "meshing/GmshExecutableJobWorkspace.h"
 #include "meshing/GmshWorkerClient.h"
 
@@ -9,9 +12,12 @@
 #include <QJsonObject>
 #include <QThread>
 #include <QTimer>
+#include <QTemporaryDir>
 
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 
 namespace
 {
@@ -48,10 +54,38 @@ bool writeRequest(
   const QString& sourceStep,
   cceda::domain::GeometryRevision requestRevision)
 {
+  const auto repository =
+    std::make_shared<cceda::geometry::OccGeometryRepository>();
+  cceda::geometry::OccGeometryService geometryService(repository);
+  cceda::geometry::OccGeometrySnapshotService snapshotService(repository);
+  const auto imported = geometryService.importStep(
+    std::filesystem::path(sourceStep.toStdWString()));
+  QTemporaryDir snapshotRoot(QDir::current().filePath(
+    "cceda-worker-client-source-XXXXXX"));
+  if (!imported.success || !snapshotRoot.isValid()
+    || imported.document.revision != requestRevision)
+  {
+    std::cerr << "Cannot create matching Worker client source fixture\n";
+    return false;
+  }
+  const auto snapshot = snapshotService.createSnapshot({
+    imported.document.revision,
+    std::filesystem::path(snapshotRoot.path().toStdWString()) / "geometry",
+    4 * 1024 * 1024,
+  });
+  if (!snapshot.succeeded())
+  {
+    std::cerr << "Cannot create Worker client snapshot: " << snapshot.detail << '\n';
+    return false;
+  }
+  const auto& value = *snapshot.snapshot;
   const cceda::meshing::GmshJobWorkspaceResult result =
-    cceda::meshing::prepareGmshExecutableJobWorkspace({
+    cceda::meshing::prepareGmshSnapshotJobWorkspace({
       workspace,
-      sourceStep,
+      QString::fromStdWString(value.geometryPath.wstring()),
+      QString::fromStdWString(value.geometryMapPath.wstring()),
+      QString::fromStdString(value.geometrySha256),
+      QString::fromStdString(value.geometryMapSha256),
       "worker-client-test",
       requestRevision,
       0.0,
@@ -321,7 +355,7 @@ int main(int argc, char* argv[])
 
   TestWorkspace incompatibleWorkspace("incompatible");
   if (!expect(incompatibleWorkspace.isValid(), "incompatible workspace is unavailable")
-    || !expect(writeRequest(incompatibleWorkspace.path(), stepPath, 17),
+    || !expect(writeRequest(incompatibleWorkspace.path(), stepPath, 1),
       "cannot write the incompatible request"))
   {
     return 1;
@@ -331,7 +365,7 @@ int main(int argc, char* argv[])
     gmshPath,
     incompatibleWorkspace.path(),
     "worker-client-test",
-    17,
+    1,
     "client-tests",
   });
   if (!expect(!incompatible.timedOut, "incompatible Worker run timed out")
@@ -346,20 +380,22 @@ int main(int argc, char* argv[])
 
   TestWorkspace successWorkspace("success");
   if (!expect(successWorkspace.isValid(), "success workspace is unavailable")
-    || !expect(writeRequest(successWorkspace.path(), stepPath, 17),
+    || !expect(writeRequest(successWorkspace.path(), stepPath, 1),
       "cannot write the success request"))
   {
     return 1;
   }
 
   const RunOutcome success = runClient({
-    workerPath, gmshPath, successWorkspace.path(), "worker-client-test", 17, "client-tests",
+    workerPath, gmshPath, successWorkspace.path(), "worker-client-test", 1, "client-tests",
   });
   if (!expect(!success.timedOut, "valid Worker run timed out")
     || !expect(success.result.has_value(), "valid Worker run did not publish a result")
     || !expect(!success.failure.has_value(), "valid Worker run reported a failure")
-    || !expect(success.result->sourceGeometryRevision == 17,
+    || !expect(success.result->sourceGeometryRevision == 1,
       "source geometry revision did not round-trip")
+    || !expect(success.result->geometryMapResultSha256.size() == 64,
+      "result does not expose the geometry-map digest")
     || !expect(success.result->nodeCount > 0, "result has no nodes")
     || !expect(success.stages.contains("completed"), "completed progress was not observed"))
   {
@@ -368,13 +404,13 @@ int main(int argc, char* argv[])
 
   TestWorkspace staleWorkspace("stale");
   if (!expect(staleWorkspace.isValid(), "stale workspace is unavailable")
-    || !expect(writeRequest(staleWorkspace.path(), stepPath, 17),
+    || !expect(writeRequest(staleWorkspace.path(), stepPath, 1),
       "cannot write the stale request"))
   {
     return 1;
   }
   const RunOutcome stale = runClient({
-    workerPath, gmshPath, staleWorkspace.path(), "worker-client-test", 18, "client-tests",
+    workerPath, gmshPath, staleWorkspace.path(), "worker-client-test", 2, "client-tests",
   });
   if (!expect(!stale.timedOut, "revision-mismatch Worker run timed out")
     || !expect(!stale.result.has_value(), "revision mismatch published a result")
@@ -387,7 +423,7 @@ int main(int argc, char* argv[])
 
   TestWorkspace forceCancelWorkspace("force-cancel");
   if (!expect(forceCancelWorkspace.isValid(), "force-cancel workspace is unavailable")
-    || !expect(writeRequest(forceCancelWorkspace.path(), stepPath, 17),
+    || !expect(writeRequest(forceCancelWorkspace.path(), stepPath, 1),
       "cannot write the force-cancel request"))
   {
     return 1;
@@ -397,7 +433,7 @@ int main(int argc, char* argv[])
     gmshPath,
     forceCancelWorkspace.path(),
     "worker-client-test",
-    17,
+    1,
     "client-tests",
   });
   if (!expect(!forceCancelled.timedOut, "forced cancellation timed out")
@@ -416,7 +452,7 @@ int main(int argc, char* argv[])
   TestWorkspace cooperativeWorkspace("cooperative-cancel");
   if (!expect(cooperativeWorkspace.isValid(),
       "cooperative-cancel workspace is unavailable")
-    || !expect(writeRequest(cooperativeWorkspace.path(), stepPath, 17),
+    || !expect(writeRequest(cooperativeWorkspace.path(), stepPath, 1),
       "cannot write the cooperative-cancel request"))
   {
     return 1;
@@ -426,7 +462,7 @@ int main(int argc, char* argv[])
     QCoreApplication::applicationFilePath(),
     cooperativeWorkspace.path(),
     "worker-client-test",
-    17,
+    1,
     "client-tests",
   });
   if (cooperativeCancelled.failure)

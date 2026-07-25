@@ -198,7 +198,12 @@ if(BUILD_TESTING)
         tests/GmshWorkerClientTests.cpp)
     target_link_libraries(cceda_gmsh_worker_client_tests PRIVATE
         Qt6::Core
-        cceda_meshing_worker_client)
+        cceda_meshing_worker_client
+        cceda_geometry_occ
+        TKTopAlgo
+        TKBRep)
+    set_property(TARGET cceda_gmsh_worker_client_tests
+        PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
     add_dependencies(cceda_gmsh_worker_client_tests cceda_gmsh_worker)
     add_test(
         NAME meshing.worker_client

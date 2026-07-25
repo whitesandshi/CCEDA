@@ -32,6 +32,7 @@ struct GmshWorkerResult
   domain::GeometryRevision sourceGeometryRevision = 0;
   QString resultPath;
   QString meshSha256;
+  QString geometryMapResultSha256;
   std::uint64_t nodeCount = 0;
   std::uint64_t triangleCount = 0;
   std::uint64_t tetrahedronCount = 0;
