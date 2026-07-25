@@ -1,4 +1,5 @@
 #include "application/MeshingJobController.h"
+#include "application/WorkerMeshArtifactValidator.h"
 
 #include "meshing/GmshExecutableJobWorkspace.h"
 #include "meshing/GeometryMap.h"
@@ -7,6 +8,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QByteArrayView>
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -19,13 +21,16 @@
 #include <QSet>
 
 #include <cmath>
+#include <new>
 #include <utility>
+#include <vector>
 
 namespace cceda::application
 {
 namespace
 {
 constexpr qint64 MaximumManifestBytes = 64 * 1024;
+constexpr qint64 MaximumGeometryMapBytes = 16LL * 1024LL * 1024LL;
 constexpr qint64 MaximumNeutralMeshBytes = 512LL * 1024LL * 1024LL;
 constexpr qint64 HashBufferBytes = 1024 * 1024;
 
@@ -234,17 +239,39 @@ ArtifactValidation validateArtifacts(
       QString("Cannot read neutral mesh: %1").arg(meshBinaryFile.errorString()));
   }
   QCryptographicHash meshBinaryHash(QCryptographicHash::Sha256);
-  while (!meshBinaryFile.atEnd())
+  std::vector<std::uint8_t> meshBinaryBytes;
+  try
   {
-    const QByteArray chunk = meshBinaryFile.read(HashBufferBytes);
-    if (chunk.isEmpty() && meshBinaryFile.error() != QFileDevice::NoError)
+    meshBinaryBytes.reserve(static_cast<std::size_t>(meshBinaryInfo.size()));
+    while (!meshBinaryFile.atEnd())
     {
-      return invalidArtifact(
-        QString("Cannot hash neutral mesh: %1").arg(meshBinaryFile.errorString()));
+      const QByteArray chunk = meshBinaryFile.read(HashBufferBytes);
+      if (chunk.isEmpty())
+      {
+        return invalidArtifact(meshBinaryFile.error() == QFileDevice::NoError
+          ? "Neutral mesh stopped yielding data before end of file"
+          : QString("Cannot hash neutral mesh: %1")
+              .arg(meshBinaryFile.errorString()));
+      }
+      if (static_cast<std::uint64_t>(chunk.size())
+        > static_cast<std::uint64_t>(MaximumNeutralMeshBytes)
+          - static_cast<std::uint64_t>(meshBinaryBytes.size()))
+      {
+        return invalidArtifact("Neutral mesh grew beyond the byte budget while reading");
+      }
+      meshBinaryHash.addData(QByteArrayView(chunk));
+      const auto* begin = reinterpret_cast<const std::uint8_t*>(chunk.constData());
+      meshBinaryBytes.insert(
+        meshBinaryBytes.end(), begin, begin + chunk.size());
     }
-    meshBinaryHash.addData(QByteArrayView(chunk));
   }
-  if (meshBinaryFile.size() != meshBinaryInfo.size())
+  catch (const std::bad_alloc&)
+  {
+    return invalidArtifact("Neutral mesh exceeds available validation memory");
+  }
+  if (meshBinaryFile.size() != meshBinaryInfo.size()
+    || meshBinaryBytes.size()
+      != static_cast<std::size_t>(meshBinaryInfo.size()))
   {
     return invalidArtifact("Neutral mesh size changed during verification");
   }
@@ -306,20 +333,44 @@ ArtifactValidation validateArtifacts(
     return invalidArtifact("Geometry-map result identity or schema is invalid");
   }
 
+  const QFileInfo inputMapInfo(prepared.geometryMapPath);
   QFile inputMapFile(prepared.geometryMapPath);
-  if (!inputMapFile.open(QIODevice::ReadOnly))
+  if (!inputMapInfo.isFile() || inputMapInfo.isSymbolicLink()
+    || inputMapInfo.size() <= 0 || inputMapInfo.size() > MaximumGeometryMapBytes
+    || !inputMapFile.open(QIODevice::ReadOnly))
   {
-    return invalidArtifact("Cannot reopen the submitted geometry map");
+    return invalidArtifact("Submitted geometry map is missing, unsafe, or oversized");
+  }
+  const QByteArray inputMapBytes = inputMapFile.read(MaximumGeometryMapBytes + 1);
+  if (inputMapFile.error() != QFileDevice::NoError
+    || inputMapBytes.size() > MaximumGeometryMapBytes
+    || !inputMapFile.atEnd() || inputMapFile.size() != inputMapInfo.size())
+  {
+    return invalidArtifact("Submitted geometry map changed or failed while reading");
+  }
+  const QString actualInputMapHash = QString::fromLatin1(
+    QCryptographicHash::hash(inputMapBytes, QCryptographicHash::Sha256).toHex());
+  if (actualInputMapHash.compare(
+    prepared.geometryMapSha256, Qt::CaseInsensitive) != 0)
+  {
+    return invalidArtifact("Submitted geometry map SHA-256 changed after sealing");
+  }
+
+  QBuffer inputMapBuffer;
+  inputMapBuffer.setData(inputMapBytes);
+  if (!inputMapBuffer.open(QIODevice::ReadOnly))
+  {
+    return invalidArtifact("Cannot parse the verified submitted geometry map");
   }
   const meshing::GeometryMapReadLimits inputMapLimits{
-    16ULL * 1024ULL * 1024ULL,
+    static_cast<std::uint64_t>(MaximumGeometryMapBytes),
     100'000,
     2'000'000,
     100'000,
     100'000,
     4096,
   };
-  const auto inputMap = meshing::readGeometryMap(inputMapFile, inputMapLimits);
+  const auto inputMap = meshing::readGeometryMap(inputMapBuffer, inputMapLimits);
   const QJsonObject mappedRegion = mappedRegions.first().toObject();
   const QJsonArray volumeTags = mappedRegion.value("gmshVolumeEntityTags").toArray();
   if (!inputMap.succeeded() || inputMap.map->regions.size() != 1
@@ -344,6 +395,29 @@ ArtifactValidation validateArtifacts(
       return invalidArtifact("Geometry-map result contains invalid Gmsh volume tags");
     }
     uniqueVolumeTags.insert(tag);
+  }
+
+  meshing::MeshBinaryLimits meshLimits;
+  meshLimits.maximumFileBytes =
+    static_cast<std::uint64_t>(MaximumNeutralMeshBytes);
+  const auto& expectedRegion = inputMap.map->regions.front();
+  const WorkerMeshArtifactValidationResult meshValidation =
+    validateWorkerMeshArtifact(
+      meshBinaryBytes,
+      {
+        active.sourceGeometryRevision,
+        root.value("backendId").toString().toStdString(),
+        root.value("backendVersion").toString().toStdString(),
+        worker.nodeCount,
+        worker.triangleCount,
+        worker.tetrahedronCount,
+        expectedRegion.regionId,
+        expectedRegion.solidGeometryId.toStdString(),
+      },
+      meshLimits);
+  if (!meshValidation.succeeded())
+  {
+    return invalidArtifact(QString::fromStdString(meshValidation.detail));
   }
   return {true, {}};
 }

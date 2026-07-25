@@ -15,7 +15,7 @@ CCEDA is a solver-neutral geometry and mesh preprocessing desktop application. T
 - Prepare an isolated job workspace from revision-bound BREP and geometry-map artifacts, validating both SHA-256 digests and publishing the request last.
 - Launch that Worker asynchronously from a main-process client that validates control messages, job identity, geometry revision, and output digests before publishing a result.
 - Convert bounded ASCII MSH 4.1 output to the neutral mesh contract using stable typed entity mappings.
-- Write a versioned `MeshRevision=0` neutral `result.meshbin` Worker artifact and verify its SHA-256 in the main process.
+- Write a versioned `MeshRevision=0` neutral `result.meshbin` Worker artifact, then verify and strictly decode it in the main process.
 - Validate solver-neutral mesh IDs, references, regions, geometry associations, and revision ownership.
 - Reject experimental Worker results when their geometry revision or mapped output artifacts are stale or invalid.
 
@@ -51,7 +51,7 @@ The main process prepares each executable-adapter workspace from an empty direct
 
 The Worker consumes the bounded geometry map before launching Gmsh. For the currently supported single-region case it extracts the actual triangle-surface and tetrahedron-volume entity tags from MSH 4.1, associates retained elements with the stable snapshot region and source Solid, and atomically writes a versioned `MeshRevision=0` `result.meshbin`. It writes `geometry-map-result.json` with the actual volume tags and rejects multi-region snapshots with `MESH_TOPOLOGY_PREPARATION_FAILED` because the current map does not yet contain enough geometric signatures to prove a tag reconciliation without relying on import order.
 
-The main-process Worker client uses asynchronous Qt process I/O, validates every newline-delimited control message against the protocol envelope, sends the versioned handshake, and propagates intermediate mesh, neutral mesh, and geometry-map digests only after a matching geometry revision and normal Worker exit. The Controller accepts BREP/map snapshot metadata rather than a STEP path, verifies the fixed result paths and their hashes, and checks the returned region/Solid identity and unique positive Gmsh volume tags against the submitted map before publishing experimental success.
+The main-process Worker client uses asynchronous Qt process I/O, validates every newline-delimited control message against the protocol envelope, sends the versioned handshake, and propagates intermediate mesh, neutral mesh, and geometry-map digests only after a matching geometry revision and normal Worker exit. The Controller accepts BREP/map snapshot metadata rather than a STEP path, re-verifies the sealed input map and fixed result paths against their hashes, decodes `result.meshbin` under explicit format/count/string budgets, and cross-checks its revision, backend, counts, region, and every geometry association against the submitted map before publishing experimental success.
 
 The Gmsh adapter now has a dependency-free ASCII MSH 4.1 reader with explicit byte, line, count, and entity-block budgets. It accepts the low-order Point, Line2, Triangle3, and Tetrahedron4 blocks written by the configured Gmsh executable, validates every tag and node reference, discards auxiliary 0D/1D elements, and converts retained elements only when stable entity and region mappings are supplied.
 
@@ -63,4 +63,4 @@ The standard-library-only neutral mesh codec implements the versioned `meshbin` 
 
 The geometry adapter now creates protocol-0.1 independent-Solid snapshots from one atomic repository revision. It writes only valid meshable Solids to `input.brep`, assigns deterministic snapshot region IDs, records Assembly/Part/Solid/Face IDs and OCCT location matrices in `geometry-map.json`, bounds the combined artifacts, and returns SHA-256 for both files without mutating canonical XCAF geometry. Shape locations are preserved but explicitly marked as not baked.
 
-This is not yet the product mesh pipeline. The intermediate `.msh` remains diagnostic and the neutral Worker artifact is still reported as experimental. Main-side meshbin structure validation, positive mesh-revision assignment, `ProjectState` commit, proven multi-region Solid/Face reconciliation, quality evaluation, resource enforcement, and UI task submission remain future slices.
+This is not yet the product mesh pipeline. The intermediate `.msh` remains diagnostic and the structurally validated neutral Worker artifact is still reported as experimental. Quality evaluation, positive mesh-revision assignment and `ProjectState` commit, proven multi-region Solid/Face reconciliation, full process-resource enforcement, and UI task submission remain future slices.

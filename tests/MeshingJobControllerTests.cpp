@@ -150,6 +150,9 @@ bool successfulJobProducesVerifiedExperimentalResult(
       "result should expose the verified geometry-map digest")
     && require(result->nodeCount > 0 && result->triangleCount > 0
       && result->tetrahedronCount > 0, "result should expose non-zero mesh counts")
+    && require(project.currentMesh() == nullptr
+        && project.meshState() == cceda::domain::MeshState::Missing,
+      "structurally verified mesh must remain uncommitted until quality validation")
     && require(lateCancellationRejected,
       "cancellation after completed progress should be rejected")
     && require(!controller.isRunning(), "controller should return to idle after success");
@@ -307,6 +310,50 @@ bool modifiedNeutralMeshIsRejected(
       "modified neutral mesh should fail main-side artifact validation")
     && require(failure->code == "MESH_OUTPUT_CORRUPT",
       "modified neutral mesh should use the protocol error code");
+}
+
+bool modifiedSealedInputMapIsRejected(
+  const QString& worker,
+  const QString& backend,
+  const SnapshotInput& snapshot)
+{
+  QTemporaryDir jobs;
+  cceda::domain::ProjectState project;
+  project.commitImportedGeometry();
+  MeshingJobController controller(project, configuration(worker, backend, jobs.path()));
+
+  bool tampered = false;
+  bool succeeded = false;
+  std::optional<MeshingJobFailure> failure;
+  QObject::connect(&controller, &MeshingJobController::progressChanged,
+    &controller, [&](const MeshingJobProgress& progress) {
+      if (!tampered && progress.stage == "completed")
+      {
+        QFile inputMap(QDir(jobs.path()).filePath(
+          "input-map-tamper-job/geometry/geometry-map.json"));
+        if (inputMap.open(QIODevice::Append))
+        {
+          tampered = inputMap.write("\n ") > 0;
+        }
+      }
+    });
+  QObject::connect(&controller, &MeshingJobController::experimentalSucceeded,
+    &controller, [&](const ExperimentalMeshingJobResult&) { succeeded = true; });
+  QObject::connect(&controller, &MeshingJobController::failed,
+    &controller, [&](const MeshingJobFailure& value) { failure = value; });
+
+  const auto rejection = controller.submit(
+    submissionFor("input-map-tamper-job", snapshot));
+  return require(!rejection.has_value(), "input-map tamper job should be accepted")
+    && require(waitUntil([&] { return succeeded || failure.has_value(); }),
+      "input-map tamper job should reach a terminal state")
+    && require(tampered, "test should modify the sealed input geometry map")
+    && require(!succeeded, "modified input geometry map must not be trusted")
+    && require(failure.has_value(), "modified input map should publish a failure")
+    && require(failure->kind == MeshingJobFailureKind::OutputValidationFailed,
+      "modified input map should fail artifact validation")
+    && require(failure->code == "MESH_OUTPUT_CORRUPT",
+      "modified input map should use the protocol error code");
 }
 
 bool cancelledJobDoesNotPublishOrMutateProject(
@@ -494,6 +541,7 @@ int main(int argc, char* argv[])
     && geometryChangeMakesInFlightResultStale(worker, backend, snapshot)
     && modifiedWorkerOutputIsRejected(worker, backend, snapshot)
     && modifiedNeutralMeshIsRejected(worker, backend, snapshot)
+    && modifiedSealedInputMapIsRejected(worker, backend, snapshot)
     && cancelledJobDoesNotPublishOrMutateProject(worker, snapshot)
     && preparationCanBeCancelledBeforeWorkerLaunch(worker, backend, snapshot)
     && invalidSubmissionIsRejectedBeforeWorkStarts(worker, backend, snapshot);

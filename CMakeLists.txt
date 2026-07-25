@@ -70,10 +70,12 @@ target_link_libraries(cceda_meshing_worker_client
 
 add_library(cceda_application STATIC
     src/application/MeshingJobController.cpp
-    src/application/MeshingJobController.h)
+    src/application/MeshingJobController.h
+    src/application/WorkerMeshArtifactValidator.cpp
+    src/application/WorkerMeshArtifactValidator.h)
 target_include_directories(cceda_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_application
-    PUBLIC Qt6::Core cceda_domain
+    PUBLIC Qt6::Core cceda_domain cceda_mesh_codec
     PRIVATE Qt6::Concurrent cceda_meshing_worker_client cceda_meshing_protocol)
 
 add_library(cceda_geometry_occ STATIC
@@ -250,6 +252,15 @@ if(BUILD_TESTING)
     add_test(
         NAME meshing.geometry_map
         COMMAND cceda_geometry_map_tests)
+
+    add_executable(cceda_worker_mesh_artifact_validator_tests
+        tests/WorkerMeshArtifactValidatorTests.cpp)
+    target_link_libraries(cceda_worker_mesh_artifact_validator_tests PRIVATE
+        cceda_application
+        cceda_mesh_codec)
+    add_test(
+        NAME application.worker_mesh_artifact_validator
+        COMMAND cceda_worker_mesh_artifact_validator_tests)
 
     add_executable(cceda_meshing_job_controller_tests
         tests/MeshingJobControllerTests.cpp)
