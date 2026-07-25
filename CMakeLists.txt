@@ -66,7 +66,7 @@ add_library(cceda_application STATIC
 target_include_directories(cceda_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_application
     PUBLIC Qt6::Core cceda_domain
-    PRIVATE Qt6::Concurrent cceda_meshing_worker_client)
+    PRIVATE Qt6::Concurrent cceda_meshing_worker_client cceda_meshing_protocol)
 
 add_library(cceda_geometry_occ STATIC
     src/geometry/OccGeometryRepository.cpp
@@ -237,7 +237,12 @@ if(BUILD_TESTING)
         tests/MeshingJobControllerTests.cpp)
     target_link_libraries(cceda_meshing_job_controller_tests PRIVATE
         Qt6::Core
-        cceda_application)
+        cceda_application
+        cceda_geometry_occ
+        TKTopAlgo
+        TKBRep)
+    set_property(TARGET cceda_meshing_job_controller_tests
+        PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
     add_dependencies(cceda_meshing_job_controller_tests cceda_gmsh_worker)
     add_test(
         NAME application.meshing_job_controller

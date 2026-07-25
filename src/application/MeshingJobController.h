@@ -23,7 +23,10 @@ struct MeshingRuntimeConfiguration
 struct MeshingJobSubmission
 {
   QString jobId;
-  QString geometrySnapshotStep;
+  QString geometrySnapshotBrep;
+  QString geometrySnapshotMap;
+  QString geometrySnapshotSha256;
+  QString geometrySnapshotMapSha256;
   double minimumSizeMm = 0.0;
   double maximumSizeMm = 0.0;
 };
@@ -44,6 +47,8 @@ struct ExperimentalMeshingJobResult
   QString manifestPath;
   QString intermediateMeshPath;
   QString meshSha256;
+  QString geometryMapResultPath;
+  QString geometryMapResultSha256;
   std::uint64_t nodeCount = 0;
   std::uint64_t triangleCount = 0;
   std::uint64_t tetrahedronCount = 0;

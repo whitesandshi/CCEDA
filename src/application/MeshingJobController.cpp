@@ -1,6 +1,7 @@
 #include "application/MeshingJobController.h"
 
 #include "meshing/GmshExecutableJobWorkspace.h"
+#include "meshing/GeometryMap.h"
 #include "meshing/GmshWorkerClient.h"
 
 #include <QtConcurrent/QtConcurrentRun>
@@ -11,9 +12,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSet>
 
 #include <cmath>
 #include <utility>
@@ -45,6 +48,12 @@ bool hasValidJobId(const QString& jobId)
   static const QRegularExpression pattern(
     QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"));
   return pattern.match(jobId).hasMatch();
+}
+
+bool isSha256(const QString& digest)
+{
+  static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
+  return pattern.match(digest).hasMatch();
 }
 
 bool hasValidSettings(const MeshingJobSubmission& submission)
@@ -82,6 +91,18 @@ ArtifactValidation invalidArtifact(QString detail)
   return {false, std::move(detail)};
 }
 
+bool hasOnlyKeys(const QJsonObject& object, const QSet<QString>& allowed)
+{
+  for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+  {
+    if (!allowed.contains(it.key()))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 ArtifactValidation validateArtifacts(
   const ActiveJob& active)
 {
@@ -101,9 +122,13 @@ ArtifactValidation validateArtifacts(
 
   const QFileInfo manifestInfo(prepared.resultPath);
   const QFileInfo meshInfo(prepared.meshPath);
+  const QFileInfo mapResultInfo(prepared.geometryMapResultPath);
   if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()
     || manifestInfo.size() <= 0 || manifestInfo.size() > MaximumManifestBytes
-    || !meshInfo.isFile() || meshInfo.isSymbolicLink() || meshInfo.size() <= 0)
+    || !meshInfo.isFile() || meshInfo.isSymbolicLink() || meshInfo.size() <= 0
+    || !mapResultInfo.isFile() || mapResultInfo.isSymbolicLink()
+    || mapResultInfo.size() <= 0 || mapResultInfo.size() > MaximumManifestBytes
+    || worker.geometryMapResultSha256.size() != 64)
   {
     return invalidArtifact("Worker output files are missing, unsafe, empty, or oversized");
   }
@@ -114,9 +139,17 @@ ArtifactValidation validateArtifacts(
     return invalidArtifact(
       QString("Cannot read result manifest: %1").arg(manifestFile.errorString()));
   }
+  const QByteArray manifestBytes = manifestFile.read(MaximumManifestBytes + 1);
+  if (manifestFile.error() != QFileDevice::NoError
+    || manifestBytes.size() > MaximumManifestBytes
+    || !manifestFile.atEnd()
+    || manifestFile.size() != manifestInfo.size())
+  {
+    return invalidArtifact("Worker result manifest changed or failed while reading");
+  }
   QJsonParseError parseError;
   const QJsonDocument manifest =
-    QJsonDocument::fromJson(manifestFile.readAll(), &parseError);
+    QJsonDocument::fromJson(manifestBytes, &parseError);
   if (parseError.error != QJsonParseError::NoError || !manifest.isObject())
   {
     return invalidArtifact("Worker result manifest is not valid JSON");
@@ -124,7 +157,13 @@ ArtifactValidation validateArtifacts(
 
   const QJsonObject root = manifest.object();
   const QJsonObject counts = root.value("counts").toObject();
-  if (!root.value("experimental").toBool(false)
+  if (!hasOnlyKeys(root, {
+      "experimental", "format", "jobId", "sourceGeometryRevision",
+      "backendId", "backendVersion", "meshPath", "meshSha256",
+      "geometryMapResultPath", "geometryMapResultSha256", "counts"})
+    || !hasOnlyKeys(counts,
+      {"nodes", "elements", "triangles", "tetrahedra"})
+    || !root.value("experimental").toBool(false)
     || root.value("format").toString() != "gmsh-msh-4.1-intermediate"
     || root.value("jobId").toString() != active.submission.jobId
     || root.value("sourceGeometryRevision").toInteger(-1)
@@ -134,6 +173,11 @@ ArtifactValidation validateArtifacts(
       root.value("meshPath").toString())) != QDir::cleanPath(prepared.meshPath)
     || root.value("meshSha256").toString().compare(
       worker.meshSha256, Qt::CaseInsensitive) != 0
+    || QDir::cleanPath(QDir(prepared.workspace).filePath(
+      root.value("geometryMapResultPath").toString()))
+      != QDir::cleanPath(prepared.geometryMapResultPath)
+    || root.value("geometryMapResultSha256").toString().compare(
+      worker.geometryMapResultSha256, Qt::CaseInsensitive) != 0
     || counts.value("nodes").toInteger(-1) != static_cast<qint64>(worker.nodeCount)
     || counts.value("triangles").toInteger(-1)
       != static_cast<qint64>(worker.triangleCount)
@@ -169,6 +213,95 @@ ArtifactValidation validateArtifacts(
   if (actualHash.compare(worker.meshSha256, Qt::CaseInsensitive) != 0)
   {
     return invalidArtifact("Intermediate mesh SHA-256 does not match the Worker result");
+  }
+
+  QFile mapResultFile(prepared.geometryMapResultPath);
+  if (!mapResultFile.open(QIODevice::ReadOnly))
+  {
+    return invalidArtifact(
+      QString("Cannot read geometry-map result: %1").arg(mapResultFile.errorString()));
+  }
+  const QByteArray mapResultBytes = mapResultFile.read(MaximumManifestBytes + 1);
+  if (mapResultFile.error() != QFileDevice::NoError
+    || mapResultBytes.size() > MaximumManifestBytes
+    || !mapResultFile.atEnd()
+    || mapResultFile.size() != mapResultInfo.size())
+  {
+    return invalidArtifact("Geometry-map result changed or failed while reading");
+  }
+  const QString actualMapHash = QString::fromLatin1(
+    QCryptographicHash::hash(mapResultBytes, QCryptographicHash::Sha256).toHex());
+  if (actualMapHash.compare(
+    worker.geometryMapResultSha256, Qt::CaseInsensitive) != 0)
+  {
+    return invalidArtifact(
+      "Geometry-map result SHA-256 does not match the Worker result");
+  }
+
+  QJsonParseError mapParseError;
+  const QJsonDocument mapResultDocument =
+    QJsonDocument::fromJson(mapResultBytes, &mapParseError);
+  if (mapParseError.error != QJsonParseError::NoError
+    || !mapResultDocument.isObject())
+  {
+    return invalidArtifact("Geometry-map result is not valid JSON");
+  }
+  const QJsonObject mapRoot = mapResultDocument.object();
+  const QJsonObject mapSchema = mapRoot.value("schema").toObject();
+  const QJsonArray mappedRegions = mapRoot.value("regions").toArray();
+  if (!hasOnlyKeys(mapRoot,
+      {"schema", "jobId", "sourceGeometryRevision", "mode", "regions"})
+    || !hasOnlyKeys(mapSchema, {"name", "major", "minor"})
+    || mapSchema.value("name").toString() != "cceda.geometry-map-result"
+    || mapSchema.value("major").toInt(-1) != 0
+    || mapSchema.value("minor").toInt(-1) != 1
+    || mapRoot.value("jobId").toString() != active.submission.jobId
+    || mapRoot.value("sourceGeometryRevision").toInteger(-1)
+      != static_cast<qint64>(active.sourceGeometryRevision)
+    || mapRoot.value("mode").toString() != "independent-solids"
+    || mappedRegions.size() != 1)
+  {
+    return invalidArtifact("Geometry-map result identity or schema is invalid");
+  }
+
+  QFile inputMapFile(prepared.geometryMapPath);
+  if (!inputMapFile.open(QIODevice::ReadOnly))
+  {
+    return invalidArtifact("Cannot reopen the submitted geometry map");
+  }
+  const meshing::GeometryMapReadLimits inputMapLimits{
+    16ULL * 1024ULL * 1024ULL,
+    100'000,
+    2'000'000,
+    100'000,
+    100'000,
+    4096,
+  };
+  const auto inputMap = meshing::readGeometryMap(inputMapFile, inputMapLimits);
+  const QJsonObject mappedRegion = mappedRegions.first().toObject();
+  const QJsonArray volumeTags = mappedRegion.value("gmshVolumeEntityTags").toArray();
+  if (!inputMap.succeeded() || inputMap.map->regions.size() != 1
+    || !hasOnlyKeys(mappedRegion,
+      {"regionId", "sourceSolidGeometryId", "gmshVolumeEntityTags"})
+    || mappedRegion.value("regionId").toInteger(-1)
+      != static_cast<qint64>(inputMap.map->regions.front().regionId)
+    || mappedRegion.value("sourceSolidGeometryId").toString()
+      != inputMap.map->regions.front().solidGeometryId
+    || volumeTags.isEmpty())
+  {
+    return invalidArtifact(
+      "Geometry-map result does not match the submitted snapshot region");
+  }
+  QSet<int> uniqueVolumeTags;
+  for (const QJsonValue& value : volumeTags)
+  {
+    const int tag = value.toInt(-1);
+    if (!value.isDouble() || value.toDouble() != static_cast<double>(tag)
+      || tag <= 0 || uniqueVolumeTags.contains(tag))
+    {
+      return invalidArtifact("Geometry-map result contains invalid Gmsh volume tags");
+    }
+    uniqueVolumeTags.insert(tag);
   }
   return {true, {}};
 }
@@ -248,9 +381,12 @@ public:
     };
     lastStage_ = "initializing";
     state_ = State::Preparing;
-    const meshing::GmshExecutableJobWorkspaceRequest request{
+    const meshing::GmshSnapshotJobWorkspaceRequest request{
       active_->workspace,
-      submission.geometrySnapshotStep,
+      submission.geometrySnapshotBrep,
+      submission.geometrySnapshotMap,
+      submission.geometrySnapshotSha256,
+      submission.geometrySnapshotMapSha256,
       submission.jobId,
       revision,
       submission.minimumSizeMm,
@@ -263,7 +399,7 @@ public:
     // https://doc.qt.io/qt-6.8/qtconcurrentrun.html#run
     preparationWatcher_.setFuture(
       QtConcurrent::run([request] {
-        return meshing::prepareGmshExecutableJobWorkspace(request);
+        return meshing::prepareGmshSnapshotJobWorkspace(request);
       }));
     return std::nullopt;
   }
@@ -357,7 +493,8 @@ private:
   {
     const QFileInfo workerInfo(configuration_.workerExecutable);
     const QFileInfo backendInfo(configuration_.backendExecutable);
-    const QFileInfo snapshotInfo(submission.geometrySnapshotStep);
+    const QFileInfo brepInfo(submission.geometrySnapshotBrep);
+    const QFileInfo mapInfo(submission.geometrySnapshotMap);
     return revision > 0
       && hasValidJobId(submission.jobId)
       && hasValidSettings(submission)
@@ -368,8 +505,12 @@ private:
       && backendInfo.isFile()
       && !configuration_.mainBuildId.isEmpty()
       && configuration_.maximumGeometryBytes > 0
-      && QDir::isAbsolutePath(submission.geometrySnapshotStep)
-      && snapshotInfo.isFile();
+      && QDir::isAbsolutePath(submission.geometrySnapshotBrep)
+      && QDir::isAbsolutePath(submission.geometrySnapshotMap)
+      && brepInfo.isFile() && !brepInfo.isSymbolicLink()
+      && mapInfo.isFile() && !mapInfo.isSymbolicLink()
+      && isSha256(submission.geometrySnapshotSha256)
+      && isSha256(submission.geometrySnapshotMapSha256);
   }
 
   bool geometryIsCurrent() const
@@ -553,6 +694,8 @@ private:
       prepared.resultPath,
       prepared.meshPath,
       worker.meshSha256.toLower(),
+      prepared.geometryMapResultPath,
+      worker.geometryMapResultSha256.toLower(),
       worker.nodeCount,
       worker.triangleCount,
       worker.tetrahedronCount,
@@ -572,6 +715,7 @@ private:
     if (active_->preparedJob)
     {
       QFile::remove(active_->preparedJob->meshPath);
+      QFile::remove(active_->preparedJob->geometryMapResultPath);
       QFile::remove(active_->preparedJob->resultPath);
     }
     const MeshingJobCancellation cancellation = *cancellation_;

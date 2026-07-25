@@ -1,4 +1,7 @@
 #include "application/MeshingJobController.h"
+#include "geometry/OccGeometryRepository.h"
+#include "geometry/OccGeometryService.h"
+#include "geometry/OccGeometrySnapshotService.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -11,7 +14,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <optional>
 
 namespace
@@ -24,6 +29,31 @@ using cceda::application::MeshingJobFailureKind;
 using cceda::application::MeshingJobProgress;
 using cceda::application::MeshingJobSubmission;
 using cceda::application::MeshingRuntimeConfiguration;
+
+struct SnapshotInput
+{
+  QString brep;
+  QString map;
+  QString brepSha256;
+  QString mapSha256;
+};
+
+MeshingJobSubmission submissionFor(
+  QString jobId,
+  const SnapshotInput& snapshot,
+  double minimumSizeMm = 0.0,
+  double maximumSizeMm = 0.0)
+{
+  return {
+    std::move(jobId),
+    snapshot.brep,
+    snapshot.map,
+    snapshot.brepSha256,
+    snapshot.mapSha256,
+    minimumSizeMm,
+    maximumSizeMm,
+  };
+}
 
 bool require(bool condition, const char* message)
 {
@@ -64,7 +94,7 @@ MeshingRuntimeConfiguration configuration(
 bool successfulJobProducesVerifiedExperimentalResult(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -87,7 +117,7 @@ bool successfulJobProducesVerifiedExperimentalResult(
       }
     });
 
-  const auto rejection = controller.submit({"success-job", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("success-job", snapshot));
   if (!require(!rejection.has_value(), "valid job should be accepted")
     || !require(waitUntil([&] { return result.has_value() || failure.has_value(); }),
       "accepted job should reach a terminal state")
@@ -110,6 +140,10 @@ bool successfulJobProducesVerifiedExperimentalResult(
     && require(QFileInfo(result->intermediateMeshPath).isFile(),
       "verified intermediate mesh should exist")
     && require(result->meshSha256.size() == 64, "result should expose the verified digest")
+    && require(QFileInfo(result->geometryMapResultPath).isFile(),
+      "verified geometry-map result should exist")
+    && require(result->geometryMapResultSha256.size() == 64,
+      "result should expose the verified geometry-map digest")
     && require(result->nodeCount > 0 && result->triangleCount > 0
       && result->tetrahedronCount > 0, "result should expose non-zero mesh counts")
     && require(lateCancellationRejected,
@@ -120,7 +154,7 @@ bool successfulJobProducesVerifiedExperimentalResult(
 bool concurrentSubmissionIsRejected(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -133,8 +167,8 @@ bool concurrentSubmissionIsRejected(
   QObject::connect(&controller, &MeshingJobController::failed,
     &controller, [&](const MeshingJobFailure&) { terminal = true; });
 
-  const auto first = controller.submit({"first-job", step, 0.0, 0.0});
-  const auto second = controller.submit({"second-job", step, 0.0, 0.0});
+  const auto first = controller.submit(submissionFor("first-job", snapshot));
+  const auto second = controller.submit(submissionFor("second-job", snapshot));
   return require(!first.has_value(), "first job should be accepted")
     && require(second.has_value(), "second active job should be rejected")
     && require(second->kind == MeshingJobFailureKind::AlreadyRunning,
@@ -146,7 +180,7 @@ bool concurrentSubmissionIsRejected(
 bool geometryChangeMakesInFlightResultStale(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -170,7 +204,7 @@ bool geometryChangeMakesInFlightResultStale(
   QObject::connect(&controller, &MeshingJobController::failed,
     &controller, [&](const MeshingJobFailure& value) { failure = value; });
 
-  const auto rejection = controller.submit({"stale-job", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("stale-job", snapshot));
   return require(!rejection.has_value(), "stale test job should be accepted")
     && require(waitUntil([&] { return succeeded || failure.has_value(); }),
       "stale test job should reach a terminal state")
@@ -187,7 +221,7 @@ bool geometryChangeMakesInFlightResultStale(
 bool modifiedWorkerOutputIsRejected(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -201,11 +235,11 @@ bool modifiedWorkerOutputIsRejected(
     &controller, [&](const MeshingJobProgress& progress) {
       if (!tampered && progress.stage == "completed")
       {
-        QFile mesh(QDir(jobs.path()).filePath(
-          "tamper-job/output/gmsh-intermediate.msh"));
-        if (mesh.open(QIODevice::Append))
+        QFile geometryMapResult(QDir(jobs.path()).filePath(
+          "tamper-job/output/geometry-map-result.json"));
+        if (geometryMapResult.open(QIODevice::Append))
         {
-          tampered = mesh.write("\n# tampered\n") > 0;
+          tampered = geometryMapResult.write("\n ") > 0;
         }
       }
     });
@@ -214,11 +248,11 @@ bool modifiedWorkerOutputIsRejected(
   QObject::connect(&controller, &MeshingJobController::failed,
     &controller, [&](const MeshingJobFailure& value) { failure = value; });
 
-  const auto rejection = controller.submit({"tamper-job", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("tamper-job", snapshot));
   return require(!rejection.has_value(), "tamper test job should be accepted")
     && require(waitUntil([&] { return succeeded || failure.has_value(); }),
       "tamper test job should reach a terminal state")
-    && require(tampered, "test should modify the published Worker mesh")
+    && require(tampered, "test should modify the published Worker geometry map")
     && require(!succeeded, "modified Worker output must not be published")
     && require(failure.has_value(), "modified output should publish a failure")
     && require(failure->kind == MeshingJobFailureKind::OutputValidationFailed,
@@ -229,7 +263,7 @@ bool modifiedWorkerOutputIsRejected(
 
 bool cancelledJobDoesNotPublishOrMutateProject(
   const QString& worker,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -260,7 +294,7 @@ bool cancelledJobDoesNotPublishOrMutateProject(
   QObject::connect(&controller, &MeshingJobController::failed,
     &controller, [&](const MeshingJobFailure& value) { failure = value; });
 
-  const auto rejection = controller.submit({"cancel-job", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("cancel-job", snapshot));
   return require(!rejection.has_value(), "cancel test job should be accepted")
     && require(waitUntil([&] {
       return succeeded || failure.has_value() || cancelled.has_value();
@@ -290,7 +324,7 @@ bool cancelledJobDoesNotPublishOrMutateProject(
 bool preparationCanBeCancelledBeforeWorkerLaunch(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -307,7 +341,7 @@ bool preparationCanBeCancelledBeforeWorkerLaunch(
   QObject::connect(&controller, &MeshingJobController::cancelled,
     &controller, [&](const MeshingJobCancellation& value) { cancelled = value; });
 
-  const auto rejection = controller.submit({"prepare-cancel", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("prepare-cancel", snapshot));
   const auto cancelRejection = controller.cancel("cancel before launch", 1'000);
   return require(!rejection.has_value(), "preparation-cancel job should be accepted")
     && require(!cancelRejection.has_value(),
@@ -330,7 +364,7 @@ bool preparationCanBeCancelledBeforeWorkerLaunch(
 bool invalidSubmissionIsRejectedBeforeWorkStarts(
   const QString& worker,
   const QString& backend,
-  const QString& step)
+  const SnapshotInput& snapshot)
 {
   QTemporaryDir jobs;
   cceda::domain::ProjectState project;
@@ -338,7 +372,7 @@ bool invalidSubmissionIsRejectedBeforeWorkStarts(
   MeshingJobController controller(project, configuration(worker, backend, jobs.path()));
 
   const auto idleCancellation = controller.cancel("nothing active", 1'000);
-  const auto rejection = controller.submit({"../escape", step, 0.0, 0.0});
+  const auto rejection = controller.submit(submissionFor("../escape", snapshot));
   return require(idleCancellation.has_value(),
       "idle controller cancellation should be rejected")
     && require(idleCancellation->kind == MeshingJobFailureKind::InvalidRequest,
@@ -376,12 +410,43 @@ int main(int argc, char* argv[])
   const QString worker = QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
   const QString backend = QFileInfo(QString::fromLocal8Bit(argv[2])).absoluteFilePath();
   const QString step = QFileInfo(QString::fromLocal8Bit(argv[3])).absoluteFilePath();
-  const bool ok = successfulJobProducesVerifiedExperimentalResult(worker, backend, step)
-    && concurrentSubmissionIsRejected(worker, backend, step)
-    && geometryChangeMakesInFlightResultStale(worker, backend, step)
-    && modifiedWorkerOutputIsRejected(worker, backend, step)
-    && cancelledJobDoesNotPublishOrMutateProject(worker, step)
-    && preparationCanBeCancelledBeforeWorkerLaunch(worker, backend, step)
-    && invalidSubmissionIsRejectedBeforeWorkStarts(worker, backend, step);
+  const auto repository =
+    std::make_shared<cceda::geometry::OccGeometryRepository>();
+  cceda::geometry::OccGeometryService geometryService(repository);
+  cceda::geometry::OccGeometrySnapshotService snapshotService(repository);
+  const auto imported = geometryService.importStep(
+    std::filesystem::path(step.toStdWString()));
+  QTemporaryDir snapshotRoot(QDir::current().filePath(
+    "cceda-controller-source-XXXXXX"));
+  if (!imported.success || !snapshotRoot.isValid())
+  {
+    std::cerr << "Cannot create Controller source snapshot fixture\n";
+    return EXIT_FAILURE;
+  }
+  const auto created = snapshotService.createSnapshot({
+    imported.document.revision,
+    std::filesystem::path(snapshotRoot.path().toStdWString()) / "geometry",
+    32ULL * 1024ULL * 1024ULL,
+  });
+  if (!created.succeeded())
+  {
+    std::cerr << "Cannot create Controller snapshot: " << created.detail << '\n';
+    return EXIT_FAILURE;
+  }
+  const auto& value = *created.snapshot;
+  const SnapshotInput snapshot{
+    QString::fromStdWString(value.geometryPath.wstring()),
+    QString::fromStdWString(value.geometryMapPath.wstring()),
+    QString::fromStdString(value.geometrySha256),
+    QString::fromStdString(value.geometryMapSha256),
+  };
+  const bool ok = successfulJobProducesVerifiedExperimentalResult(
+      worker, backend, snapshot)
+    && concurrentSubmissionIsRejected(worker, backend, snapshot)
+    && geometryChangeMakesInFlightResultStale(worker, backend, snapshot)
+    && modifiedWorkerOutputIsRejected(worker, backend, snapshot)
+    && cancelledJobDoesNotPublishOrMutateProject(worker, snapshot)
+    && preparationCanBeCancelledBeforeWorkerLaunch(worker, backend, snapshot)
+    && invalidSubmissionIsRejectedBeforeWorkStarts(worker, backend, snapshot);
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
