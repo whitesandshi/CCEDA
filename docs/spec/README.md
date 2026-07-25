@@ -16,6 +16,7 @@ This directory specifies the CCEDA geometry and mesh preprocessing product. The 
 | [03-geometry-service.md](03-geometry-service.md) | STEP/XCAF import, geometry queries, validation, healing, and undo |
 | [04-meshing-protocol.md](04-meshing-protocol.md) | Main application to Gmsh Worker job and result protocol |
 | [05-manual-acceptance.md](05-manual-acceptance.md) | Manual acceptance models, procedures, evidence, and release gates |
+| [06-neutral-mesh-binary.md](06-neutral-mesh-binary.md) | Versioned neutral mesh binary layout, limits, and compatibility |
 
 ## Normative Language
 

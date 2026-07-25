@@ -112,7 +112,7 @@ Data blocks:
 - regions: internal region ID and original Solid/fragment mapping.
 - associations: compressed mesh-to-`GeometryId` mapping.
 
-Alignment and compression are frozen before coding. Readers use block lengths to skip unknown optional blocks in a compatible minor version.
+The exact header, directory, alignment, checksum, and block layouts are defined in [06-neutral-mesh-binary.md](06-neutral-mesh-binary.md). Readers use block lengths to skip unknown optional blocks in a compatible minor version.
 
 ## 9. Reports and Job History
 
