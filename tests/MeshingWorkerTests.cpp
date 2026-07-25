@@ -1,15 +1,23 @@
+#include "geometry/OccGeometryRepository.h"
+#include "geometry/OccGeometryService.h"
+#include "geometry/OccGeometrySnapshotService.h"
+#include "meshing/GmshExecutableJobWorkspace.h"
 #include "meshing/GmshMsh41Reader.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QTemporaryDir>
 
 #include <iostream>
 #include <fstream>
+#include <filesystem>
+#include <memory>
 
 namespace {
 
@@ -67,36 +75,51 @@ QJsonObject parseMessage(const QByteArray& line)
 
 bool writeRequest(const QString& workspace, const QString& sourceStep)
 {
-    QDir root(workspace);
-    if (!QDir().mkpath(root.filePath("geometry"))
-        || !QDir().mkpath(root.filePath("output"))
-        || !QDir().mkpath(root.filePath("logs"))) {
-        std::cerr << "Cannot create workspace directories under "
-                  << workspace.toStdString() << '\n';
+    const auto repository =
+        std::make_shared<cceda::geometry::OccGeometryRepository>();
+    cceda::geometry::OccGeometryService geometryService(repository);
+    cceda::geometry::OccGeometrySnapshotService snapshotService(repository);
+    const auto imported = geometryService.importStep(
+        std::filesystem::path(sourceStep.toStdWString()));
+    if (!imported.success) {
+        std::cerr << "Cannot import Worker STEP fixture\n";
         return false;
     }
-    const QString input = root.filePath("geometry/input.step");
-    if (!QFile::copy(sourceStep, input)) {
-        std::cerr << "Cannot copy " << sourceStep.toStdString()
-                  << " to " << input.toStdString() << '\n';
+
+    QTemporaryDir snapshotRoot(QDir::current().filePath(
+        "cceda-worker-source-snapshot-XXXXXX"));
+    if (!snapshotRoot.isValid()) {
+        std::cerr << "Cannot create Worker source snapshot directory\n";
         return false;
     }
-    const QJsonObject request{
-        {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
-        {"jobId", "worker-test-job"},
-        {"sourceGeometryRevision", 17},
-        {"geometry", QJsonObject{{"path", "geometry/input.step"}, {"sha256", sha256(input)}}},
-        {"output", QJsonObject{{"meshPath", "output/gmsh-intermediate.msh"}, {"resultPath", "output/result.json"}}},
-        {"settings", QJsonObject{{"minimumSizeMm", 0.0}, {"maximumSizeMm", 0.0}}},
-    };
-    QFile file(root.filePath("request.json"));
-    if (!file.open(QIODevice::WriteOnly)
-        || file.write(QJsonDocument(request).toJson(QJsonDocument::Indented)) <= 0) {
-        std::cerr << "Cannot write request.json: "
-                  << file.errorString().toStdString() << '\n';
+    const auto snapshot = snapshotService.createSnapshot({
+        imported.document.revision,
+        std::filesystem::path(snapshotRoot.path().toStdWString()) / "geometry",
+        32ULL * 1024ULL * 1024ULL,
+    });
+    if (!snapshot.succeeded()) {
+        std::cerr << "Cannot create Worker geometry snapshot: "
+                  << snapshot.detail << '\n';
         return false;
     }
-    return true;
+    const auto& value = *snapshot.snapshot;
+    const auto prepared = cceda::meshing::prepareGmshSnapshotJobWorkspace({
+        workspace,
+        QString::fromStdWString(value.geometryPath.wstring()),
+        QString::fromStdWString(value.geometryMapPath.wstring()),
+        QString::fromStdString(value.geometrySha256),
+        QString::fromStdString(value.geometryMapSha256),
+        "worker-test-job",
+        value.sourceGeometryRevision,
+        0.0,
+        0.0,
+        32ULL * 1024ULL * 1024ULL,
+    });
+    if (!prepared.succeeded()) {
+        std::cerr << "Cannot seal Worker geometry snapshot: "
+                  << prepared.detail.toStdString() << '\n';
+    }
+    return prepared.succeeded();
 }
 
 } // namespace
@@ -231,12 +254,16 @@ int main(int argc, char* argv[])
 
     bool completed = false;
     bool succeeded = false;
+    QJsonObject successPayload;
     while (controlOutput.canReadLine()) {
         const QJsonObject message = parseMessage(controlOutput.readLine());
         completed = completed
             || (message.value("type").toString() == "progress"
                 && message.value("payload").toObject().value("stage").toString() == "completed");
-        succeeded = succeeded || message.value("type").toString() == "result";
+        if (message.value("type").toString() == "result") {
+            succeeded = true;
+            successPayload = message.value("payload").toObject();
+        }
     }
     if (!expect(completed && succeeded, "Worker must report completed and result")) {
         return 1;
@@ -252,7 +279,7 @@ int main(int argc, char* argv[])
     if (!expect(result.value("experimental").toBool(), "intermediate result must be marked experimental")
         || !expect(result.value("format").toString() == "gmsh-msh-4.1-intermediate",
                    "intermediate format is not explicit")
-        || !expect(result.value("sourceGeometryRevision").toInteger() == 17,
+        || !expect(result.value("sourceGeometryRevision").toInteger() == 1,
                    "geometry revision must round-trip")
         || !expect(QFileInfo::exists(meshPath), "validated intermediate mesh is missing")
         || !expect(result.value("meshSha256").toString() == sha256(meshPath),
@@ -265,19 +292,60 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    const QString mapResultPath =
+        root.filePath("output/geometry-map-result.json");
+    QFile mapResultFile(mapResultPath);
+    if (!expect(mapResultFile.open(QIODevice::ReadOnly),
+                "geometry-map-result.json is missing")) {
+        return 1;
+    }
+    const QJsonObject mapResult =
+        QJsonDocument::fromJson(mapResultFile.readAll()).object();
+    const QJsonArray mappedRegions = mapResult.value("regions").toArray();
+    if (!expect(result.value("geometryMapResultSha256").toString()
+                    == sha256(mapResultPath),
+                "geometry-map result hash does not match result.json")
+        || !expect(successPayload.value("geometryMapResultSha256").toString()
+                        == result.value("geometryMapResultSha256").toString(),
+                   "control result and manifest map hashes differ")
+        || !expect(mappedRegions.size() == 1,
+                   "single-region snapshot must return one mapped region")
+        || !expect(!mappedRegions.first().toObject()
+                        .value("sourceSolidGeometryId").toString().isEmpty(),
+                   "mapped region must retain its source Solid identity")
+        || !expect(!mappedRegions.first().toObject()
+                        .value("gmshVolumeEntityTags").toArray().isEmpty(),
+                   "mapped region must expose actual Gmsh volume entity tags")) {
+        return 1;
+    }
+
+    const QJsonObject mappedRegion = mappedRegions.first().toObject();
+    const auto mappedRegionId = static_cast<cceda::domain::MeshRegionId>(
+        mappedRegion.value("regionId").toInteger());
+    const std::string mappedSolidId =
+        mappedRegion.value("sourceSolidGeometryId").toString().toStdString();
+
     cceda::meshing::GmshMeshMapping meshMapping;
     meshMapping.regions = {
-        {10, {"screw/solid-1"}},
+        {mappedRegionId, {mappedSolidId}},
     };
     for (int surfaceTag = 1; surfaceTag <= 10; ++surfaceTag) {
         meshMapping.entities.push_back({
             2,
             surfaceTag,
-            10,
+            mappedRegionId,
             QString("screw/solid-1/face-%1").arg(surfaceTag).toStdString(),
         });
     }
-    meshMapping.entities.push_back({3, 1, 10, "screw/solid-1"});
+    for (const QJsonValue& tag
+         : mappedRegion.value("gmshVolumeEntityTags").toArray()) {
+        meshMapping.entities.push_back({
+            3,
+            tag.toInt(),
+            mappedRegionId,
+            mappedSolidId,
+        });
+    }
 
     const QByteArray nativeMeshPath = QFile::encodeName(meshPath);
     std::ifstream meshInput(nativeMeshPath.constData(), std::ios::binary);
@@ -285,7 +353,7 @@ int main(int argc, char* argv[])
         cceda::meshing::readGmshMsh41(
             meshInput,
             {
-                17,
+                1,
                 "2026-07-24T00:00:00.000Z",
                 result.value("backendVersion").toString().toStdString(),
                 cceda::domain::MeshConformity::NonConformal,

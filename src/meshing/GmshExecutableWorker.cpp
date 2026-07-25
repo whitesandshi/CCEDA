@@ -1,3 +1,5 @@
+#include "meshing/GeometryMap.h"
+
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -14,6 +16,7 @@
 #include <QSet>
 #include <QTextStream>
 
+#include <algorithm>
 #include <cstdio>
 #include <optional>
 
@@ -36,6 +39,7 @@ struct MeshCounts
   qint64 elements = 0;
   qint64 triangles = 0;
   qint64 tetrahedra = 0;
+  QSet<int> tetrahedronVolumeEntityTags;
 };
 
 QString utcTimestamp()
@@ -429,9 +433,15 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
         }
         bool typeOk = false;
         bool countOk = false;
+        bool dimensionOk = false;
+        bool entityTagOk = false;
+        const int entityDimension = blockHeader.at(0).toInt(&dimensionOk);
+        const int entityTag = blockHeader.at(1).toInt(&entityTagOk);
         const int elementType = blockHeader.at(2).toInt(&typeOk);
         const qint64 elementCount = blockHeader.at(3).toLongLong(&countOk);
-        if (!typeOk || !countOk || elementCount < 0)
+        if (!dimensionOk || !entityTagOk || !typeOk || !countOk
+          || entityDimension < 0 || entityDimension > 3
+          || entityTag <= 0 || elementCount < 0)
         {
           error = "Invalid MSH 4.1 element block";
           return std::nullopt;
@@ -443,6 +453,10 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
         else if (elementType == 4)
         {
           counts.tetrahedra += elementCount;
+          if (entityDimension == 3 && elementCount > 0)
+          {
+            counts.tetrahedronVolumeEntityTags.insert(entityTag);
+          }
         }
         for (qint64 element = 0; element < elementCount; ++element)
         {
@@ -462,7 +476,8 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
     error = "Expected ASCII MSH 4.1 intermediate output";
     return std::nullopt;
   }
-  if (!sawNodes || !sawElements || counts.triangles <= 0 || counts.tetrahedra <= 0)
+  if (!sawNodes || !sawElements || counts.triangles <= 0 || counts.tetrahedra <= 0
+    || counts.tetrahedronVolumeEntityTags.isEmpty())
   {
     error = "Mesh does not contain nodes, Triangle3, and Tetrahedron4 elements";
     return std::nullopt;
@@ -618,9 +633,27 @@ int main(int argc, char* argv[])
   const QJsonObject geometry = request->value("geometry").toObject();
   const QJsonObject output = request->value("output").toObject();
   const QJsonObject settings = request->value("settings").toObject();
+  const bool snapshotRequest = geometry.contains("brep") || geometry.contains("map");
+  const QJsonObject geometrySchema = geometry.value("schema").toObject();
+  const QJsonObject brep = geometry.value("brep").toObject();
+  const QJsonObject geometryMapArtifact = geometry.value("map").toObject();
   if (geometryRevision <= 0
-    || !hasOnlyKeys(geometry, {"path", "sha256"})
-    || !hasOnlyKeys(output, {"meshPath", "resultPath"})
+    || (snapshotRequest
+      ? (!hasOnlyKeys(geometry,
+          {"schema", "mode", "canonicalUnit", "brep", "map"})
+        || !hasOnlyKeys(geometrySchema, {"major", "minor"})
+        || geometrySchema.value("major").toInt(-1)
+          != cceda::meshing::GeometryMapSchemaMajor
+        || geometrySchema.value("minor").toInt(-1)
+          != cceda::meshing::GeometryMapSchemaMinor
+        || geometry.value("mode").toString() != "independent-solids"
+        || geometry.value("canonicalUnit").toString() != "mm"
+        || !hasOnlyKeys(brep, {"path", "sha256"})
+        || !hasOnlyKeys(geometryMapArtifact, {"path", "sha256"})
+        || !hasOnlyKeys(output,
+          {"meshPath", "geometryMapResultPath", "resultPath"}))
+      : (!hasOnlyKeys(geometry, {"path", "sha256"})
+        || !hasOnlyKeys(output, {"meshPath", "resultPath"})))
     || !hasOnlyKeys(settings, {"minimumSizeMm", "maximumSizeMm"})
     || (settings.contains("minimumSizeMm")
       && !settings.value("minimumSizeMm").isDouble())
@@ -631,7 +664,27 @@ int main(int argc, char* argv[])
       "request fields are missing or unsupported");
   }
 
-  const auto inputPath = workspacePath(workspace, geometry.value("path").toString(), error);
+  const QString inputRelativePath = snapshotRequest
+    ? brep.value("path").toString()
+    : geometry.value("path").toString();
+  const QString expectedInputHash = snapshotRequest
+    ? brep.value("sha256").toString()
+    : geometry.value("sha256").toString();
+  if (snapshotRequest
+    && (inputRelativePath != "geometry/input.brep"
+      || geometryMapArtifact.value("path").toString()
+        != "geometry/geometry-map.json"
+      || output.value("meshPath").toString()
+        != "output/gmsh-intermediate.msh"
+      || output.value("geometryMapResultPath").toString()
+        != "output/geometry-map-result.json"
+      || output.value("resultPath").toString() != "output/result.json"))
+  {
+    return fail(jobId, "MESH_INPUT_INVALID", "initializing",
+      "Snapshot request paths do not match the protocol workspace layout");
+  }
+
+  const auto inputPath = workspacePath(workspace, inputRelativePath, error);
   if (!inputPath || !QFileInfo(*inputPath).isFile())
   {
     return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
@@ -639,10 +692,70 @@ int main(int argc, char* argv[])
   }
   const QString actualInputHash = sha256(*inputPath, error);
   if (actualInputHash.isEmpty()
-    || actualInputHash.compare(geometry.value("sha256").toString(), Qt::CaseInsensitive) != 0)
+    || actualInputHash.compare(expectedInputHash, Qt::CaseInsensitive) != 0)
   {
     return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
       error.isEmpty() ? "Input geometry SHA-256 mismatch" : error);
+  }
+
+  std::optional<cceda::meshing::GeometryMap> parsedGeometryMap;
+  std::optional<QString> geometryMapResultPath;
+  if (snapshotRequest)
+  {
+    const auto mapPath = workspacePath(
+      workspace, geometryMapArtifact.value("path").toString(), error);
+    if (!mapPath || !QFileInfo(*mapPath).isFile())
+    {
+      return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
+        mapPath ? "Geometry map does not exist" : error);
+    }
+    const QString actualMapHash = sha256(*mapPath, error);
+    if (actualMapHash.isEmpty()
+      || actualMapHash.compare(
+        geometryMapArtifact.value("sha256").toString(), Qt::CaseInsensitive) != 0)
+    {
+      return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
+        error.isEmpty() ? "Geometry map SHA-256 mismatch" : error);
+    }
+
+    QFile mapFile(*mapPath);
+    if (!mapFile.open(QIODevice::ReadOnly))
+    {
+      return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
+        QString("Cannot open geometry map: %1").arg(mapFile.errorString()));
+    }
+    const cceda::meshing::GeometryMapReadLimits mapLimits{
+      16ULL * 1024ULL * 1024ULL,
+      100'000,
+      2'000'000,
+      100'000,
+      100'000,
+      4096,
+    };
+    const auto parsed = cceda::meshing::readGeometryMap(mapFile, mapLimits);
+    if (!parsed.succeeded()
+      || parsed.map->sourceGeometryRevision
+        != static_cast<std::uint64_t>(geometryRevision))
+    {
+      return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
+        parsed.succeeded()
+          ? "Geometry map revision does not match request.json"
+          : QString("Geometry map is invalid: %1").arg(parsed.detail));
+    }
+    sendProgress(jobId, "preparing-topology", 25);
+    if (parsed.map->regions.size() != 1)
+    {
+      return fail(jobId, "MESH_TOPOLOGY_PREPARATION_FAILED",
+        "preparing-topology",
+        "Executable Worker can only prove Gmsh entity mapping for one snapshot region");
+    }
+    parsedGeometryMap = *parsed.map;
+    geometryMapResultPath = workspacePath(
+      workspace, output.value("geometryMapResultPath").toString(), error);
+    if (!geometryMapResultPath)
+    {
+      return fail(jobId, "MESH_INPUT_INVALID", "initializing", error);
+    }
   }
 
   const auto meshPath = workspacePath(workspace, output.value("meshPath").toString(), error);
@@ -662,6 +775,8 @@ int main(int argc, char* argv[])
     meshFileInfo.completeBaseName() + ".tmp." + meshFileInfo.suffix());
   if (!QDir().mkpath(QFileInfo(*meshPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*resultPath).absolutePath())
+    || (geometryMapResultPath
+      && !QDir().mkpath(QFileInfo(*geometryMapResultPath).absolutePath()))
     || !QDir().mkpath(QFileInfo(*logPath).absolutePath()))
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing",
@@ -715,6 +830,10 @@ int main(int argc, char* argv[])
       }
       QFile::remove(temporaryMeshPath);
       QFile::remove(*meshPath);
+      if (geometryMapResultPath)
+      {
+        QFile::remove(*geometryMapResultPath);
+      }
       QFile::remove(*resultPath);
       sendMessage("cancelled", jobId, QJsonObject{
         {"reason", cancellation->reason},
@@ -826,7 +945,47 @@ int main(int argc, char* argv[])
       "Cannot publish the validated experimental mesh");
   }
 
-  const QJsonObject result{
+  QString geometryMapResultHash;
+  if (parsedGeometryMap && geometryMapResultPath)
+  {
+    QList<int> volumeTags = counts->tetrahedronVolumeEntityTags.values();
+    std::sort(volumeTags.begin(), volumeTags.end());
+    QJsonArray serializedVolumeTags;
+    for (const int tag : volumeTags)
+    {
+      serializedVolumeTags.append(tag);
+    }
+    const auto& region = parsedGeometryMap->regions.front();
+    const QJsonObject geometryMapResult{
+      {"schema", QJsonObject{
+        {"name", "cceda.geometry-map-result"},
+        {"major", 0},
+        {"minor", 1},
+      }},
+      {"jobId", jobId},
+      {"sourceGeometryRevision", geometryRevision},
+      {"mode", "independent-solids"},
+      {"regions", QJsonArray{QJsonObject{
+        {"regionId", static_cast<qint64>(region.regionId)},
+        {"sourceSolidGeometryId", region.solidGeometryId},
+        {"gmshVolumeEntityTags", serializedVolumeTags},
+      }}},
+    };
+    if (!writeJsonAtomically(*geometryMapResultPath, geometryMapResult, error))
+    {
+      QFile::remove(*meshPath);
+      return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
+    }
+    geometryMapResultHash = sha256(*geometryMapResultPath, error);
+    if (geometryMapResultHash.isEmpty())
+    {
+      QFile::remove(*geometryMapResultPath);
+      QFile::remove(*meshPath);
+      return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
+    }
+  }
+
+  QJsonObject result{
     {"experimental", true},
     {"format", "gmsh-msh-4.1-intermediate"},
     {"jobId", jobId},
@@ -842,8 +1001,19 @@ int main(int argc, char* argv[])
       {"tetrahedra", counts->tetrahedra},
     }},
   };
+  if (geometryMapResultPath)
+  {
+    result.insert("geometryMapResultPath",
+      output.value("geometryMapResultPath").toString());
+    result.insert("geometryMapResultSha256", geometryMapResultHash);
+  }
   if (!writeJsonAtomically(*resultPath, result, error))
   {
+    if (geometryMapResultPath)
+    {
+      QFile::remove(*geometryMapResultPath);
+    }
+    QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
   if (const auto cancelled = checkCancellation(nullptr, "writing-result"))
@@ -852,7 +1022,7 @@ int main(int argc, char* argv[])
   }
 
   sendProgress(jobId, "completed", 100);
-  sendMessage("result", jobId, QJsonObject{
+  QJsonObject successPayload{
     {"status", "experimental-success"},
     {"sourceGeometryRevision", geometryRevision},
     {"resultPath", output.value("resultPath").toString()},
@@ -860,6 +1030,11 @@ int main(int argc, char* argv[])
     {"triangleCount", counts->triangles},
     {"tetrahedronCount", counts->tetrahedra},
     {"meshSha256", meshHash},
-  });
+  };
+  if (!geometryMapResultHash.isEmpty())
+  {
+    successPayload.insert("geometryMapResultSha256", geometryMapResultHash);
+  }
+  sendMessage("result", jobId, successPayload);
   return 0;
 }
