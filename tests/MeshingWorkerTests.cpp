@@ -122,6 +122,99 @@ bool writeRequest(const QString& workspace, const QString& sourceStep)
     return prepared.succeeded();
 }
 
+bool rejectsLegacyStepRequest(
+    const QString& workerPath,
+    const QString& gmshPath,
+    const QString& sourceStep)
+{
+    QTemporaryDir legacyRoot(QDir::current().filePath(
+        "cceda-legacy-worker-request-XXXXXX"));
+    if (!legacyRoot.isValid()) {
+        return false;
+    }
+    const QDir root(legacyRoot.path());
+    if (!QDir().mkpath(root.filePath("geometry"))
+        || !QDir().mkpath(root.filePath("output"))
+        || !QDir().mkpath(root.filePath("logs"))) {
+        return false;
+    }
+    const QString legacyInput = root.filePath("geometry/input.step");
+    if (!QFile::copy(sourceStep, legacyInput)) {
+        return false;
+    }
+    const QJsonObject request{
+        {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
+        {"jobId", "legacy-worker-job"},
+        {"sourceGeometryRevision", 1},
+        {"geometry", QJsonObject{
+            {"path", "geometry/input.step"},
+            {"sha256", sha256(legacyInput)},
+        }},
+        {"output", QJsonObject{
+            {"meshPath", "output/gmsh-intermediate.msh"},
+            {"resultPath", "output/result.json"},
+        }},
+        {"settings", QJsonObject{
+            {"minimumSizeMm", 0.0},
+            {"maximumSizeMm", 0.0},
+        }},
+    };
+    QFile requestFile(root.filePath("request.json"));
+    if (!requestFile.open(QIODevice::WriteOnly)
+        || requestFile.write(QJsonDocument(request).toJson(
+            QJsonDocument::Indented)) <= 0) {
+        return false;
+    }
+    requestFile.close();
+
+    const QJsonObject ack{
+        {"type", "helloAck"},
+        {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
+        {"messageId", "legacy-main-1"},
+        {"jobId", "legacy-worker-job"},
+        {"timestampUtc", "2026-07-25T00:00:00.000Z"},
+        {"payload", QJsonObject{
+            {"workspace", QDir::cleanPath(legacyRoot.path())},
+            {"mainBuildId", "worker-test"},
+        }},
+    };
+    const QString controlInput = root.filePath("legacy-ack.ndjson");
+    const QString controlOutput = root.filePath("legacy-output.ndjson");
+    QFile ackFile(controlInput);
+    const QByteArray ackLine =
+        QJsonDocument(ack).toJson(QJsonDocument::Compact) + '\n';
+    if (!ackFile.open(QIODevice::WriteOnly)
+        || ackFile.write(ackLine) != ackLine.size()) {
+        return false;
+    }
+    ackFile.close();
+
+    QProcess worker;
+    worker.setStandardInputFile(controlInput);
+    worker.setStandardOutputFile(controlOutput);
+    worker.start(workerPath,
+        {"--workspace", legacyRoot.path(), "--gmsh", gmshPath});
+    if (!worker.waitForStarted(5000) || !worker.waitForFinished(30000)
+        || worker.exitCode() == 0) {
+        worker.kill();
+        return false;
+    }
+    QFile messages(controlOutput);
+    if (!messages.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QJsonObject hello = parseMessage(messages.readLine());
+    bool inputRejected = false;
+    while (messages.canReadLine()) {
+        const QJsonObject message = parseMessage(messages.readLine());
+        inputRejected = inputRejected
+            || (message.value("type").toString() == "error"
+                && message.value("payload").toObject().value("code").toString()
+                    == "MESH_INPUT_INVALID");
+    }
+    return hello.value("type").toString() == "hello" && inputRejected;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -134,6 +227,10 @@ int main(int argc, char* argv[])
     const QString workerPath = QDir::cleanPath(QString::fromLocal8Bit(argv[1]));
     const QString gmshPath = QDir::cleanPath(QString::fromLocal8Bit(argv[2]));
     const QString stepPath = QDir::cleanPath(QString::fromLocal8Bit(argv[3]));
+    if (!expect(rejectsLegacyStepRequest(workerPath, gmshPath, stepPath),
+                "Worker did not reject the removed STEP request shape")) {
+        return 1;
+    }
     TestWorkspace workspace;
     if (!expect(workspace.isValid(), "temporary workspace is unavailable")
         || !expect(writeRequest(workspace.path(), stepPath), "cannot create Worker request")) {
