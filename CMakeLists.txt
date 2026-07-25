@@ -44,6 +44,12 @@ add_library(cceda_mesh_gmsh STATIC
 target_include_directories(cceda_mesh_gmsh PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_gmsh PUBLIC cceda_domain)
 
+add_library(cceda_meshing_protocol STATIC
+    src/meshing/GeometryMap.cpp
+    src/meshing/GeometryMap.h)
+target_include_directories(cceda_meshing_protocol PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_meshing_protocol PUBLIC Qt6::Core)
+
 add_library(cceda_meshing_worker_client STATIC
     src/meshing/GmshExecutableJobWorkspace.cpp
     src/meshing/GmshExecutableJobWorkspace.h
@@ -111,7 +117,7 @@ set_target_properties(CCEDA PROPERTIES
     VS_DEBUGGER_ENVIRONMENT "PATH=${OpenCASCADE_BINARY_DIR};${CCEDA_QT_ROOT}/bin;%PATH%")
 
 if(MSVC)
-    foreach(target cceda_domain cceda_mesh_gmsh cceda_meshing_worker_client cceda_application cceda_geometry_occ cceda_visualization_occ cceda_gmsh_worker CCEDA)
+    foreach(target cceda_domain cceda_mesh_gmsh cceda_meshing_protocol cceda_meshing_worker_client cceda_application cceda_geometry_occ cceda_visualization_occ cceda_gmsh_worker CCEDA)
         target_compile_options(${target} PRIVATE /utf-8 /W4)
     endforeach()
 endif()
@@ -141,6 +147,7 @@ set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT CCEDA)
 set_target_properties(
     cceda_domain
     cceda_mesh_gmsh
+    cceda_meshing_protocol
     cceda_meshing_worker_client
     cceda_application
     cceda_geometry_occ
@@ -205,6 +212,14 @@ if(BUILD_TESTING)
         NAME meshing.gmsh_job_workspace
         COMMAND cceda_gmsh_job_workspace_tests)
 
+    add_executable(cceda_geometry_map_tests
+        tests/GeometryMapTests.cpp)
+    target_link_libraries(cceda_geometry_map_tests PRIVATE
+        cceda_meshing_protocol)
+    add_test(
+        NAME meshing.geometry_map
+        COMMAND cceda_geometry_map_tests)
+
     add_executable(cceda_meshing_job_controller_tests
         tests/MeshingJobControllerTests.cpp)
     target_link_libraries(cceda_meshing_job_controller_tests PRIVATE
@@ -255,6 +270,7 @@ if(BUILD_TESTING)
         cceda_domain_tests
         cceda_mesh_model_tests
         cceda_gmsh_msh41_reader_tests
+        cceda_geometry_map_tests
         cceda_geometry_import_tests
         cceda_geometry_snapshot_tests
         PROPERTIES
