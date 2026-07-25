@@ -56,7 +56,9 @@ add_library(cceda_meshing_worker_client STATIC
     src/meshing/GmshWorkerClient.cpp
     src/meshing/GmshWorkerClient.h)
 target_include_directories(cceda_meshing_worker_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(cceda_meshing_worker_client PUBLIC Qt6::Core cceda_domain)
+target_link_libraries(cceda_meshing_worker_client
+    PUBLIC Qt6::Core cceda_domain
+    PRIVATE cceda_meshing_protocol)
 
 add_library(cceda_application STATIC
     src/application/MeshingJobController.cpp

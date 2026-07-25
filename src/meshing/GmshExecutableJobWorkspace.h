@@ -20,12 +20,28 @@ struct GmshExecutableJobWorkspaceRequest
   std::uint64_t maximumGeometryBytes = 0;
 };
 
+struct GmshSnapshotJobWorkspaceRequest
+{
+  QString workspace;
+  QString sourceBrep;
+  QString sourceGeometryMap;
+  QString expectedGeometrySha256;
+  QString expectedGeometryMapSha256;
+  QString jobId;
+  domain::GeometryRevision sourceGeometryRevision = 0;
+  double minimumSizeMm = 0.0;
+  double maximumSizeMm = 0.0;
+  std::uint64_t maximumSnapshotBytes = 0;
+};
+
 struct PreparedGmshExecutableJob
 {
   QString workspace;
   QString requestPath;
   QString geometryPath;
   QString geometrySha256;
+  QString geometryMapPath;
+  QString geometryMapSha256;
   QString meshPath;
   QString resultPath;
 };
@@ -39,6 +55,10 @@ enum class GmshJobWorkspaceErrorCode
   DirectoryCreationFailed,
   GeometryReadFailed,
   GeometryWriteFailed,
+  GeometryMapReadFailed,
+  GeometryMapWriteFailed,
+  SnapshotHashMismatch,
+  GeometryMapInvalid,
   RequestWriteFailed,
 };
 
@@ -59,4 +79,9 @@ struct GmshJobWorkspaceResult
 // outside this contract.
 [[nodiscard]] GmshJobWorkspaceResult prepareGmshExecutableJobWorkspace(
   const GmshExecutableJobWorkspaceRequest& request);
+
+// Copies and seals an immutable protocol-0.1 BREP snapshot. The expected
+// digests bind the job to the artifacts produced for one geometry revision.
+[[nodiscard]] GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
+  const GmshSnapshotJobWorkspaceRequest& request);
 }
