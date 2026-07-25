@@ -167,7 +167,7 @@ Applications MAY choose smaller limits from the job memory budget. They MUST NOT
 
 ## 14. Acceptance
 
-1. Worker and committed models round-trip without losing IDs, coordinates, order, metadata, conformity, or mappings.
+1. Worker and committed models round-trip without losing IDs, coordinates, per-type element order, metadata, conformity, or mappings; decoded elements use canonical Triangle3-then-Tetrahedron4 order.
 2. Re-encoding one model produces identical bytes.
 3. Bad magic, versions/features/compression, reserved fields, overflow, overlap, truncation, trailing bytes, UTF-8, indexes, or checksums are rejected.
 4. Limits are enforced before allocations based on declared values.
