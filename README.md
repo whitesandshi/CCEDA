@@ -56,8 +56,10 @@ The Gmsh adapter now has a dependency-free ASCII MSH 4.1 reader with explicit by
 
 The domain now defines a storage-neutral `MeshModel` and validates Worker-versus-committed revision rules, IDs, references, regions, and geometry associations without Qt, OCCT, or Gmsh types.
 
+The standard-library-only neutral mesh codec implements the versioned `meshbin` 0.1 contract with a checksummed header and block directory, deterministic GeometryId associations, explicit file/count/string budgets, Worker-versus-committed revision modes, and compatible skipping of checksum-valid unknown optional blocks. It has no Qt, OCCT, or Gmsh dependency.
+
 `ProjectState` owns the current neutral mesh, preserves stale meshes for inspection after geometry changes, rejects invalid or obsolete Worker artifacts without changing project state, and assigns monotonically increasing positive mesh revisions only on successful commit.
 
 The geometry adapter now creates protocol-0.1 independent-Solid snapshots from one atomic repository revision. It writes only valid meshable Solids to `input.brep`, assigns deterministic snapshot region IDs, records Assembly/Part/Solid/Face IDs and OCCT location matrices in `geometry-map.json`, bounds the combined artifacts, and returns SHA-256 for both files without mutating canonical XCAF geometry. Shape locations are preserved but explicitly marked as not baked.
 
-This is not yet the product mesh pipeline. The intermediate `.msh` is marked experimental and is not committed as a domain mesh. Proven multi-region Solid/Face reconciliation, neutral `result.meshbin` serialization, quality evaluation, resource enforcement, and UI task submission remain future slices.
+This is not yet the product mesh pipeline. The intermediate `.msh` is marked experimental and is not committed as a domain mesh. Proven multi-region Solid/Face reconciliation, Worker/Controller integration of neutral `result.meshbin`, quality evaluation, resource enforcement, and UI task submission remain future slices.

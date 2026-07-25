@@ -24,7 +24,7 @@ Continue the protocol-0.1 meshing path from the proven BREP snapshot flow toward
 
 ### Phase 2: Neutral Worker Artifact
 
-- [ ] Freeze a versioned, bounded `result.meshbin` codec contract against `MeshModel`.
+- [x] Freeze and implement a versioned, bounded `result.meshbin` codec contract against `MeshModel`.
 - [ ] Convert validated MSH 4.1 output and geometry mapping into `MeshRevision=0` meshbin.
 - [ ] Validate meshbin in the main process before assigning a committed revision.
 
@@ -42,6 +42,6 @@ Continue the protocol-0.1 meshing path from the proven BREP snapshot flow toward
 | Binary format freezes too early | Expensive compatibility burden | Define codec acceptance tests and explicit version/count budgets before Worker integration |
 | Gmsh Face mapping remains incomplete | Invalid neutral associations | Keep meshbin integration limited to associations proven by the result map; fail closed otherwise |
 
-## Open Questions
+## Resolved Questions
 
-- Exact meshbin alignment and optional-block rules remain to be frozen before Phase 2 implementation, as required by `docs/spec/02-project-format.md`.
+- Meshbin 0.1 alignment, directory, checksum, compatibility, and optional-block rules are frozen in `docs/spec/06-neutral-mesh-binary.md` and ADR 0002.
