@@ -140,6 +140,10 @@ bool successfulJobProducesVerifiedExperimentalResult(
     && require(QFileInfo(result->intermediateMeshPath).isFile(),
       "verified intermediate mesh should exist")
     && require(result->meshSha256.size() == 64, "result should expose the verified digest")
+    && require(QFileInfo(result->neutralMeshPath).isFile(),
+      "verified neutral mesh should exist")
+    && require(result->meshBinarySha256.size() == 64,
+      "result should expose the verified neutral mesh digest")
     && require(QFileInfo(result->geometryMapResultPath).isFile(),
       "verified geometry-map result should exist")
     && require(result->geometryMapResultSha256.size() == 64,
@@ -259,6 +263,50 @@ bool modifiedWorkerOutputIsRejected(
       "modified output should fail main-side artifact validation")
     && require(failure->code == "MESH_OUTPUT_CORRUPT",
       "modified output should use the protocol error code");
+}
+
+bool modifiedNeutralMeshIsRejected(
+  const QString& worker,
+  const QString& backend,
+  const SnapshotInput& snapshot)
+{
+  QTemporaryDir jobs;
+  cceda::domain::ProjectState project;
+  project.commitImportedGeometry();
+  MeshingJobController controller(project, configuration(worker, backend, jobs.path()));
+
+  bool tampered = false;
+  bool succeeded = false;
+  std::optional<MeshingJobFailure> failure;
+  QObject::connect(&controller, &MeshingJobController::progressChanged,
+    &controller, [&](const MeshingJobProgress& progress) {
+      if (!tampered && progress.stage == "completed")
+      {
+        QFile neutralMesh(QDir(jobs.path()).filePath(
+          "meshbin-tamper-job/output/result.meshbin"));
+        if (neutralMesh.open(QIODevice::Append))
+        {
+          tampered = neutralMesh.write("x") == 1;
+        }
+      }
+    });
+  QObject::connect(&controller, &MeshingJobController::experimentalSucceeded,
+    &controller, [&](const ExperimentalMeshingJobResult&) { succeeded = true; });
+  QObject::connect(&controller, &MeshingJobController::failed,
+    &controller, [&](const MeshingJobFailure& value) { failure = value; });
+
+  const auto rejection = controller.submit(
+    submissionFor("meshbin-tamper-job", snapshot));
+  return require(!rejection.has_value(), "meshbin tamper job should be accepted")
+    && require(waitUntil([&] { return succeeded || failure.has_value(); }),
+      "meshbin tamper job should reach a terminal state")
+    && require(tampered, "test should modify the published neutral mesh")
+    && require(!succeeded, "modified neutral mesh must not be published")
+    && require(failure.has_value(), "modified neutral mesh should publish a failure")
+    && require(failure->kind == MeshingJobFailureKind::OutputValidationFailed,
+      "modified neutral mesh should fail main-side artifact validation")
+    && require(failure->code == "MESH_OUTPUT_CORRUPT",
+      "modified neutral mesh should use the protocol error code");
 }
 
 bool cancelledJobDoesNotPublishOrMutateProject(
@@ -445,6 +493,7 @@ int main(int argc, char* argv[])
     && concurrentSubmissionIsRejected(worker, backend, snapshot)
     && geometryChangeMakesInFlightResultStale(worker, backend, snapshot)
     && modifiedWorkerOutputIsRejected(worker, backend, snapshot)
+    && modifiedNeutralMeshIsRejected(worker, backend, snapshot)
     && cancelledJobDoesNotPublishOrMutateProject(worker, snapshot)
     && preparationCanBeCancelledBeforeWorkerLaunch(worker, backend, snapshot)
     && invalidSubmissionIsRejectedBeforeWorkStarts(worker, backend, snapshot);

@@ -26,6 +26,7 @@ namespace cceda::application
 namespace
 {
 constexpr qint64 MaximumManifestBytes = 64 * 1024;
+constexpr qint64 MaximumNeutralMeshBytes = 512LL * 1024LL * 1024LL;
 constexpr qint64 HashBufferBytes = 1024 * 1024;
 
 struct ActiveJob
@@ -122,12 +123,17 @@ ArtifactValidation validateArtifacts(
 
   const QFileInfo manifestInfo(prepared.resultPath);
   const QFileInfo meshInfo(prepared.meshPath);
+  const QFileInfo meshBinaryInfo(prepared.meshBinaryPath);
   const QFileInfo mapResultInfo(prepared.geometryMapResultPath);
   if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()
     || manifestInfo.size() <= 0 || manifestInfo.size() > MaximumManifestBytes
     || !meshInfo.isFile() || meshInfo.isSymbolicLink() || meshInfo.size() <= 0
+    || !meshBinaryInfo.isFile() || meshBinaryInfo.isSymbolicLink()
+    || meshBinaryInfo.size() <= 0
+    || meshBinaryInfo.size() > MaximumNeutralMeshBytes
     || !mapResultInfo.isFile() || mapResultInfo.isSymbolicLink()
     || mapResultInfo.size() <= 0 || mapResultInfo.size() > MaximumManifestBytes
+    || worker.meshBinarySha256.size() != 64
     || worker.geometryMapResultSha256.size() != 64)
   {
     return invalidArtifact("Worker output files are missing, unsafe, empty, or oversized");
@@ -160,6 +166,7 @@ ArtifactValidation validateArtifacts(
   if (!hasOnlyKeys(root, {
       "experimental", "format", "jobId", "sourceGeometryRevision",
       "backendId", "backendVersion", "meshPath", "meshSha256",
+      "meshBinaryPath", "meshBinarySha256",
       "geometryMapResultPath", "geometryMapResultSha256", "counts"})
     || !hasOnlyKeys(counts,
       {"nodes", "elements", "triangles", "tetrahedra"})
@@ -173,6 +180,11 @@ ArtifactValidation validateArtifacts(
       root.value("meshPath").toString())) != QDir::cleanPath(prepared.meshPath)
     || root.value("meshSha256").toString().compare(
       worker.meshSha256, Qt::CaseInsensitive) != 0
+    || QDir::cleanPath(QDir(prepared.workspace).filePath(
+      root.value("meshBinaryPath").toString()))
+      != QDir::cleanPath(prepared.meshBinaryPath)
+    || root.value("meshBinarySha256").toString().compare(
+      worker.meshBinarySha256, Qt::CaseInsensitive) != 0
     || QDir::cleanPath(QDir(prepared.workspace).filePath(
       root.value("geometryMapResultPath").toString()))
       != QDir::cleanPath(prepared.geometryMapResultPath)
@@ -213,6 +225,36 @@ ArtifactValidation validateArtifacts(
   if (actualHash.compare(worker.meshSha256, Qt::CaseInsensitive) != 0)
   {
     return invalidArtifact("Intermediate mesh SHA-256 does not match the Worker result");
+  }
+
+  QFile meshBinaryFile(prepared.meshBinaryPath);
+  if (!meshBinaryFile.open(QIODevice::ReadOnly))
+  {
+    return invalidArtifact(
+      QString("Cannot read neutral mesh: %1").arg(meshBinaryFile.errorString()));
+  }
+  QCryptographicHash meshBinaryHash(QCryptographicHash::Sha256);
+  while (!meshBinaryFile.atEnd())
+  {
+    const QByteArray chunk = meshBinaryFile.read(HashBufferBytes);
+    if (chunk.isEmpty() && meshBinaryFile.error() != QFileDevice::NoError)
+    {
+      return invalidArtifact(
+        QString("Cannot hash neutral mesh: %1").arg(meshBinaryFile.errorString()));
+    }
+    meshBinaryHash.addData(QByteArrayView(chunk));
+  }
+  if (meshBinaryFile.size() != meshBinaryInfo.size())
+  {
+    return invalidArtifact("Neutral mesh size changed during verification");
+  }
+  const QString actualMeshBinaryHash =
+    QString::fromLatin1(meshBinaryHash.result().toHex());
+  if (actualMeshBinaryHash.compare(
+    worker.meshBinarySha256, Qt::CaseInsensitive) != 0)
+  {
+    return invalidArtifact(
+      "Neutral mesh SHA-256 does not match the Worker result");
   }
 
   QFile mapResultFile(prepared.geometryMapResultPath);
@@ -694,6 +736,8 @@ private:
       prepared.resultPath,
       prepared.meshPath,
       worker.meshSha256.toLower(),
+      prepared.meshBinaryPath,
+      worker.meshBinarySha256.toLower(),
       prepared.geometryMapResultPath,
       worker.geometryMapResultSha256.toLower(),
       worker.nodeCount,
@@ -715,6 +759,7 @@ private:
     if (active_->preparedJob)
     {
       QFile::remove(active_->preparedJob->meshPath);
+      QFile::remove(active_->preparedJob->meshBinaryPath);
       QFile::remove(active_->preparedJob->geometryMapResultPath);
       QFile::remove(active_->preparedJob->resultPath);
     }

@@ -47,6 +47,8 @@ struct ExperimentalMeshingJobResult
   QString manifestPath;
   QString intermediateMeshPath;
   QString meshSha256;
+  QString neutralMeshPath;
+  QString meshBinarySha256;
   QString geometryMapResultPath;
   QString geometryMapResultSha256;
   std::uint64_t nodeCount = 0;

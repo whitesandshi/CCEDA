@@ -32,6 +32,7 @@ struct PreparedGmshExecutableJob
   QString geometryMapPath;
   QString geometryMapSha256;
   QString meshPath;
+  QString meshBinaryPath;
   QString geometryMapResultPath;
   QString resultPath;
 };

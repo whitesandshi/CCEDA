@@ -2,7 +2,7 @@
 #include "geometry/OccGeometryService.h"
 #include "geometry/OccGeometrySnapshotService.h"
 #include "meshing/GmshExecutableJobWorkspace.h"
-#include "meshing/GmshMsh41Reader.h"
+#include "meshing/MeshBinaryCodec.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -14,10 +14,11 @@
 #include <QProcess>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <iostream>
-#include <fstream>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -373,6 +374,7 @@ int main(int argc, char* argv[])
     const QJsonObject result = QJsonDocument::fromJson(resultFile.readAll()).object();
     const QJsonObject counts = result.value("counts").toObject();
     const QString meshPath = root.filePath("output/gmsh-intermediate.msh");
+    const QString meshBinaryPath = root.filePath("output/result.meshbin");
     if (!expect(result.value("experimental").toBool(), "intermediate result must be marked experimental")
         || !expect(result.value("format").toString() == "gmsh-msh-4.1-intermediate",
                    "intermediate format is not explicit")
@@ -381,6 +383,14 @@ int main(int argc, char* argv[])
         || !expect(QFileInfo::exists(meshPath), "validated intermediate mesh is missing")
         || !expect(result.value("meshSha256").toString() == sha256(meshPath),
                    "intermediate mesh hash does not match result")
+        || !expect(QFileInfo::exists(meshBinaryPath), "neutral mesh result is missing")
+        || !expect(result.value("meshBinaryPath").toString() == "output/result.meshbin",
+                   "neutral mesh path does not match the workspace contract")
+        || !expect(result.value("meshBinarySha256").toString() == sha256(meshBinaryPath),
+                   "neutral mesh hash does not match result")
+        || !expect(successPayload.value("meshBinarySha256").toString()
+                       == result.value("meshBinarySha256").toString(),
+                   "control result and manifest neutral mesh hashes differ")
         || !expect(!QFileInfo::exists(root.filePath("output/gmsh-intermediate.tmp.msh")),
                    "temporary mesh was not atomically published")
         || !expect(counts.value("nodes").toInteger() > 0, "mesh has no nodes")
@@ -422,52 +432,30 @@ int main(int argc, char* argv[])
     const std::string mappedSolidId =
         mappedRegion.value("sourceSolidGeometryId").toString().toStdString();
 
-    cceda::meshing::GmshMeshMapping meshMapping;
-    meshMapping.regions = {
-        {mappedRegionId, {mappedSolidId}},
-    };
-    for (int surfaceTag = 1; surfaceTag <= 10; ++surfaceTag) {
-        meshMapping.entities.push_back({
-            2,
-            surfaceTag,
-            mappedRegionId,
-            QString("screw/solid-1/face-%1").arg(surfaceTag).toStdString(),
-        });
+    QFile meshBinaryFile(meshBinaryPath);
+    if (!expect(meshBinaryFile.open(QIODevice::ReadOnly),
+                "neutral mesh result cannot be opened")) {
+        return 1;
     }
-    for (const QJsonValue& tag
-         : mappedRegion.value("gmshVolumeEntityTags").toArray()) {
-        meshMapping.entities.push_back({
-            3,
-            tag.toInt(),
-            mappedRegionId,
-            mappedSolidId,
-        });
+    const QByteArray meshBinaryBytes = meshBinaryFile.readAll();
+    if (!expect(!meshBinaryBytes.isEmpty(), "neutral mesh result is empty")) {
+        return 1;
     }
-
-    const QByteArray nativeMeshPath = QFile::encodeName(meshPath);
-    std::ifstream meshInput(nativeMeshPath.constData(), std::ios::binary);
-    const cceda::meshing::GmshMsh41ReadResult converted =
-        cceda::meshing::readGmshMsh41(
-            meshInput,
-            {
-                1,
-                "2026-07-24T00:00:00.000Z",
-                result.value("backendVersion").toString().toStdString(),
-                cceda::domain::MeshConformity::NonConformal,
-            },
-            meshMapping,
-            {
-                4 * 1024 * 1024,
-                64 * 1024,
-                1'000'000,
-                2'000'000,
-                100'000,
-            });
-    if (!expect(meshInput.is_open(), "published MSH cannot be opened by the neutral reader")
-        || !expect(converted.succeeded(),
-            QString("published MSH cannot be converted at line %1: %2")
-                .arg(converted.line)
+    const auto* meshBinaryBegin = reinterpret_cast<const std::uint8_t*>(
+        meshBinaryBytes.constData());
+    const cceda::meshing::MeshBinaryReadResult converted =
+        cceda::meshing::readMeshBinary(
+            std::vector<std::uint8_t>(
+                meshBinaryBegin,
+                meshBinaryBegin + meshBinaryBytes.size()),
+            cceda::domain::MeshValidationMode::WorkerArtifact);
+    if (!expect(converted.succeeded(),
+            QString("neutral mesh result cannot be decoded: %1")
                 .arg(QString::fromStdString(converted.detail)))
+        || !expect(converted.mesh->meshRevision == 0,
+            "Worker neutral mesh revision must be zero")
+        || !expect(converted.mesh->sourceGeometryRevision == 1,
+            "neutral mesh geometry revision must round-trip")
         || !expect(converted.mesh->nodes.size()
                 == static_cast<std::size_t>(counts.value("nodes").toInteger()),
             "neutral node count differs from Worker result")
@@ -476,10 +464,19 @@ int main(int argc, char* argv[])
                     counts.value("triangles").toInteger()
                     + counts.value("tetrahedra").toInteger()),
             "neutral retained-element count differs from Worker result")
-        || !expect(cceda::domain::validateMeshModel(
-                *converted.mesh,
-                cceda::domain::MeshValidationMode::WorkerArtifact).valid(),
-            "real Gmsh output does not satisfy the neutral Worker contract")) {
+        || !expect(converted.mesh->regions.size() == 1
+                && converted.mesh->regions.front().id == mappedRegionId
+                && converted.mesh->regions.front().sourceGeometryIds
+                    == std::vector<std::string>{mappedSolidId},
+            "neutral region does not preserve its source Solid mapping")
+        || !expect(std::all_of(
+                converted.mesh->elements.begin(),
+                converted.mesh->elements.end(),
+                [&](const cceda::domain::MeshElement& element) {
+                    return element.regionId == mappedRegionId
+                        && element.geometryId == mappedSolidId;
+                }),
+            "neutral elements are not associated with the mapped source Solid")) {
         return 1;
     }
 

@@ -396,6 +396,8 @@ int main(int argc, char* argv[])
       "source geometry revision did not round-trip")
     || !expect(success.result->geometryMapResultSha256.size() == 64,
       "result does not expose the geometry-map digest")
+    || !expect(success.result->meshBinarySha256.size() == 64,
+      "result does not expose the neutral mesh digest")
     || !expect(success.result->nodeCount > 0, "result has no nodes")
     || !expect(success.stages.contains("completed"), "completed progress was not observed"))
   {
@@ -484,6 +486,9 @@ int main(int argc, char* argv[])
     || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
       "output/gmsh-intermediate.msh")).exists(),
       "cancelled job retained a formal mesh output")
+    || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
+      "output/result.meshbin")).exists(),
+      "cancelled job retained a neutral mesh output")
     || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
       "output/result.json")).exists(),
       "cancelled job retained a result manifest"))

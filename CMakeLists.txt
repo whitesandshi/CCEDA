@@ -95,7 +95,11 @@ set_property(TARGET cceda_visualization_occ PROPERTY DISABLE_PRECOMPILE_HEADERS 
 
 qt_add_executable(cceda_gmsh_worker
     src/meshing/GmshExecutableWorker.cpp)
-target_link_libraries(cceda_gmsh_worker PRIVATE Qt6::Core cceda_meshing_protocol)
+target_link_libraries(cceda_gmsh_worker PRIVATE
+    Qt6::Core
+    cceda_mesh_codec
+    cceda_mesh_gmsh
+    cceda_meshing_protocol)
 set_target_properties(cceda_gmsh_worker PROPERTIES
     WIN32_EXECUTABLE FALSE
     DISABLE_PRECOMPILE_HEADERS ON)
@@ -171,7 +175,7 @@ if(BUILD_TESTING)
         tests/MeshingWorkerTests.cpp)
     target_link_libraries(cceda_meshing_worker_tests PRIVATE
         Qt6::Core
-        cceda_mesh_gmsh
+        cceda_mesh_codec
         cceda_meshing_worker_client
         cceda_geometry_occ
         TKTopAlgo

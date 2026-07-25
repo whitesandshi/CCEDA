@@ -277,6 +277,7 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
     }},
     {"output", QJsonObject{
       {"meshPath", "output/gmsh-intermediate.msh"},
+      {"meshBinaryPath", "output/result.meshbin"},
       {"geometryMapResultPath", "output/geometry-map-result.json"},
       {"resultPath", "output/result.json"},
     }},
@@ -305,6 +306,7 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
       map.artifact->path,
       map.artifact->sha256,
       root.filePath("output/gmsh-intermediate.msh"),
+      root.filePath("output/result.meshbin"),
       root.filePath("output/geometry-map-result.json"),
       root.filePath("output/result.json"),
     },

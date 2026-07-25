@@ -1,4 +1,6 @@
 #include "meshing/GeometryMap.h"
+#include "meshing/GmshMsh41Reader.h"
+#include "meshing/MeshBinaryCodec.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -18,6 +20,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
+#include <limits>
 #include <optional>
 
 #ifdef Q_OS_WIN
@@ -39,6 +43,7 @@ struct MeshCounts
   qint64 elements = 0;
   qint64 triangles = 0;
   qint64 tetrahedra = 0;
+  QSet<int> triangleSurfaceEntityTags;
   QSet<int> tetrahedronVolumeEntityTags;
 };
 
@@ -449,6 +454,10 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
         if (elementType == 2)
         {
           counts.triangles += elementCount;
+          if (entityDimension == 2 && elementCount > 0)
+          {
+            counts.triangleSurfaceEntityTags.insert(entityTag);
+          }
         }
         else if (elementType == 4)
         {
@@ -494,6 +503,34 @@ bool writeJsonAtomically(const QString& path, const QJsonObject& object, QString
     return false;
   }
   if (file.write(QJsonDocument(object).toJson(QJsonDocument::Indented)) < 0 || !file.commit())
+  {
+    error = QString("Cannot commit %1: %2").arg(path, file.errorString());
+    return false;
+  }
+  return true;
+}
+
+bool writeBinaryAtomically(
+  const QString& path,
+  const std::vector<std::uint8_t>& bytes,
+  QString& error)
+{
+  if (bytes.empty()
+    || bytes.size() > static_cast<std::size_t>((std::numeric_limits<qint64>::max)()))
+  {
+    error = "Neutral mesh payload size is invalid";
+    return false;
+  }
+  QSaveFile file(path);
+  if (!file.open(QIODevice::WriteOnly))
+  {
+    error = QString("Cannot write %1: %2").arg(path, file.errorString());
+    return false;
+  }
+  const qint64 byteCount = static_cast<qint64>(bytes.size());
+  if (file.write(reinterpret_cast<const char*>(bytes.data()), byteCount)
+      != byteCount
+    || !file.commit())
   {
     error = QString("Cannot commit %1: %2").arg(path, file.errorString());
     return false;
@@ -649,7 +686,7 @@ int main(int argc, char* argv[])
     || !hasOnlyKeys(brep, {"path", "sha256"})
     || !hasOnlyKeys(geometryMapArtifact, {"path", "sha256"})
     || !hasOnlyKeys(output,
-      {"meshPath", "geometryMapResultPath", "resultPath"})
+      {"meshPath", "meshBinaryPath", "geometryMapResultPath", "resultPath"})
     || !hasOnlyKeys(settings, {"minimumSizeMm", "maximumSizeMm"})
     || (settings.contains("minimumSizeMm")
       && !settings.value("minimumSizeMm").isDouble())
@@ -667,6 +704,8 @@ int main(int argc, char* argv[])
       != "geometry/geometry-map.json"
     || output.value("meshPath").toString()
       != "output/gmsh-intermediate.msh"
+    || output.value("meshBinaryPath").toString()
+      != "output/result.meshbin"
     || output.value("geometryMapResultPath").toString()
       != "output/geometry-map-result.json"
     || output.value("resultPath").toString() != "output/result.json")
@@ -746,9 +785,11 @@ int main(int argc, char* argv[])
   const QString geometryMapResultPath = *resolvedGeometryMapResultPath;
 
   const auto meshPath = workspacePath(workspace, output.value("meshPath").toString(), error);
+  const auto meshBinaryPath = workspacePath(
+    workspace, output.value("meshBinaryPath").toString(), error);
   const auto resultPath = workspacePath(workspace, output.value("resultPath").toString(), error);
   const auto logPath = workspacePath(workspace, "logs/gmsh.log", error);
-  if (!meshPath || !resultPath || !logPath)
+  if (!meshPath || !meshBinaryPath || !resultPath || !logPath)
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing", error);
   }
@@ -758,9 +799,15 @@ int main(int argc, char* argv[])
     return fail(jobId, "MESH_INPUT_INVALID", "initializing",
       "Experimental mesh output must use the .msh extension");
   }
+  if (QFileInfo(*meshBinaryPath).suffix().compare("meshbin", Qt::CaseInsensitive) != 0)
+  {
+    return fail(jobId, "MESH_INPUT_INVALID", "initializing",
+      "Neutral mesh output must use the .meshbin extension");
+  }
   const QString temporaryMeshPath = meshFileInfo.dir().filePath(
     meshFileInfo.completeBaseName() + ".tmp." + meshFileInfo.suffix());
   if (!QDir().mkpath(QFileInfo(*meshPath).absolutePath())
+    || !QDir().mkpath(QFileInfo(*meshBinaryPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*resultPath).absolutePath())
     || !QDir().mkpath(QFileInfo(geometryMapResultPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*logPath).absolutePath()))
@@ -816,6 +863,7 @@ int main(int argc, char* argv[])
       }
       QFile::remove(temporaryMeshPath);
       QFile::remove(*meshPath);
+      QFile::remove(*meshBinaryPath);
       QFile::remove(geometryMapResultPath);
       QFile::remove(*resultPath);
       sendMessage("cancelled", jobId, QJsonObject{
@@ -917,6 +965,80 @@ int main(int argc, char* argv[])
     QFile::remove(temporaryMeshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
+
+  const auto& region = parsedGeometryMap.regions.front();
+  const std::string solidGeometryId = region.solidGeometryId.toStdString();
+  cceda::meshing::GmshMeshMapping meshMapping;
+  meshMapping.regions.push_back({region.regionId, {solidGeometryId}});
+  for (const int tag : counts->triangleSurfaceEntityTags)
+  {
+    meshMapping.entities.push_back({
+      2, tag, region.regionId, solidGeometryId,
+    });
+  }
+  for (const int tag : counts->tetrahedronVolumeEntityTags)
+  {
+    meshMapping.entities.push_back({
+      3, tag, region.regionId, solidGeometryId,
+    });
+  }
+
+  const QByteArray nativeMeshPath = QFile::encodeName(temporaryMeshPath);
+  std::ifstream meshInput(nativeMeshPath.constData(), std::ios::binary);
+  if (!meshInput.is_open())
+  {
+    QFile::remove(temporaryMeshPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
+      "Cannot open validated Gmsh output for neutral conversion");
+  }
+  const cceda::meshing::GmshMsh41ReadResult converted =
+    cceda::meshing::readGmshMsh41(
+      meshInput,
+      {
+        static_cast<cceda::domain::GeometryRevision>(geometryRevision),
+        utcTimestamp().toStdString(),
+        backendVersion.toStdString(),
+        cceda::domain::MeshConformity::NonConformal,
+      },
+      meshMapping,
+      {
+        512ULL * 1024ULL * 1024ULL,
+        64ULL * 1024ULL,
+        10'000'000,
+        40'000'000,
+        100'000,
+      });
+  meshInput.close();
+  if (!converted.succeeded())
+  {
+    QFile::remove(temporaryMeshPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
+      QString("Cannot convert Gmsh output at line %1: %2")
+        .arg(converted.line)
+        .arg(QString::fromStdString(converted.detail)));
+  }
+  const cceda::meshing::MeshBinaryWriteResult encoded =
+    cceda::meshing::writeMeshBinary(
+      *converted.mesh,
+      cceda::domain::MeshValidationMode::WorkerArtifact);
+  if (!encoded.succeeded()
+    || !writeBinaryAtomically(*meshBinaryPath, encoded.bytes, error))
+  {
+    QFile::remove(temporaryMeshPath);
+    QFile::remove(*meshBinaryPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
+      encoded.succeeded()
+        ? error
+        : QString("Cannot encode neutral mesh: %1")
+            .arg(QString::fromStdString(encoded.detail)));
+  }
+  const QString meshBinaryHash = sha256(*meshBinaryPath, error);
+  if (meshBinaryHash.isEmpty())
+  {
+    QFile::remove(temporaryMeshPath);
+    QFile::remove(*meshBinaryPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
+  }
   if (const auto cancelled = checkCancellation(nullptr, "writing-result"))
   {
     return *cancelled;
@@ -924,6 +1046,7 @@ int main(int argc, char* argv[])
   if (QFileInfo::exists(*meshPath) || !QFile::rename(temporaryMeshPath, *meshPath))
   {
     QFile::remove(temporaryMeshPath);
+    QFile::remove(*meshBinaryPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
       "Cannot publish the validated experimental mesh");
   }
@@ -935,7 +1058,6 @@ int main(int argc, char* argv[])
   {
     serializedVolumeTags.append(tag);
   }
-  const auto& region = parsedGeometryMap.regions.front();
   const QJsonObject geometryMapResult{
     {"schema", QJsonObject{
       {"name", "cceda.geometry-map-result"},
@@ -953,6 +1075,7 @@ int main(int argc, char* argv[])
   };
   if (!writeJsonAtomically(geometryMapResultPath, geometryMapResult, error))
   {
+    QFile::remove(*meshBinaryPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
@@ -960,6 +1083,7 @@ int main(int argc, char* argv[])
   if (geometryMapResultHash.isEmpty())
   {
     QFile::remove(geometryMapResultPath);
+    QFile::remove(*meshBinaryPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
@@ -973,6 +1097,8 @@ int main(int argc, char* argv[])
     {"backendVersion", backendVersion},
     {"meshPath", output.value("meshPath").toString()},
     {"meshSha256", meshHash},
+    {"meshBinaryPath", output.value("meshBinaryPath").toString()},
+    {"meshBinarySha256", meshBinaryHash},
     {"counts", QJsonObject{
       {"nodes", counts->nodes},
       {"elements", counts->elements},
@@ -986,6 +1112,7 @@ int main(int argc, char* argv[])
   if (!writeJsonAtomically(*resultPath, result, error))
   {
     QFile::remove(geometryMapResultPath);
+    QFile::remove(*meshBinaryPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
@@ -1003,6 +1130,7 @@ int main(int argc, char* argv[])
     {"triangleCount", counts->triangles},
     {"tetrahedronCount", counts->tetrahedra},
     {"meshSha256", meshHash},
+    {"meshBinarySha256", meshBinaryHash},
   };
   if (!geometryMapResultHash.isEmpty())
   {
