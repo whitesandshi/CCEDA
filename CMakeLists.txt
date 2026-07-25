@@ -46,7 +46,9 @@ target_link_libraries(cceda_mesh_gmsh PUBLIC cceda_domain)
 
 add_library(cceda_mesh_codec STATIC
     src/meshing/MeshBinaryCodec.cpp
-    src/meshing/MeshBinaryCodec.h)
+    src/meshing/MeshBinaryCodec.h
+    src/meshing/MeshBinaryCodecInternal.h
+    src/meshing/MeshBinaryReader.cpp)
 target_include_directories(cceda_mesh_codec PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_codec PUBLIC cceda_domain)
 
