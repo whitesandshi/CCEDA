@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/Revisions.h"
+#include "domain/MeshGenerationSettings.h"
 
 #include <array>
 #include <cstdint>
@@ -19,6 +20,7 @@ struct GeometrySnapshotRequest
   domain::GeometryRevision sourceGeometryRevision = 0;
   std::filesystem::path outputDirectory;
   std::uint64_t maximumSnapshotBytes = 0;
+  domain::MeshGenerationMode mode = domain::MeshGenerationMode::IndependentSolids;
 };
 
 struct GeometrySnapshotRegion
@@ -31,6 +33,7 @@ struct GeometrySnapshotRegion
   std::vector<std::string> faceGeometryIds;
   std::array<double, 16> brepLocation{};
   std::array<double, 6> brepBoundsMm{};
+  std::vector<std::string> sourceSolidGeometryIds;
 };
 
 struct GeometrySnapshotExclusion
@@ -52,6 +55,7 @@ struct GeometrySnapshot
   domain::GeometryRevision sourceGeometryRevision = 0;
   std::string canonicalUnit = "mm";
   bool transformsBaked = false;
+  domain::MeshGenerationMode mode = domain::MeshGenerationMode::IndependentSolids;
   std::filesystem::path geometryPath;
   std::filesystem::path geometryMapPath;
   std::string geometrySha256;
@@ -68,6 +72,7 @@ enum class GeometrySnapshotErrorCode
   InvalidRequest,
   RevisionMismatch,
   NoMeshableSolids,
+  ConformalPreparationFailed,
   OutputDirectoryNotEmpty,
   RepositoryInconsistent,
   SnapshotTooLarge,

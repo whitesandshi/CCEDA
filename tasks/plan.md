@@ -206,8 +206,9 @@ recomputes. The Controller now commits a quality-valid mesh through
 - [x] Add failing multi-Solid Worker and Controller integration tests before generation changes.
 - [x] Reconcile every independent Solid to its generated surface and volume entities.
 - [x] Publish and independently validate the complete multi-region result map.
-- [ ] Add task-only Fragment/Imprint for explicit conformal mode without mutating canonical geometry.
-- [ ] Run focused, full Release, and desktop runtime verification.
+- [x] Add task-only Fragment/Imprint for explicit conformal mode without mutating canonical geometry.
+- [x] Run focused and full Release verification.
+- [ ] Complete desktop runtime verification from an interactive Windows session.
 
 ### Later Slices
 

@@ -136,6 +136,26 @@ int main()
       "validated shared-Face candidates are retained");
   }
 
+  QJsonObject conformalMap = validMap();
+  conformalMap.insert("mode", "conformal-multi-region");
+  QJsonArray conformalRegions = conformalMap.value("regions").toArray();
+  QJsonObject conformalFirst = conformalRegions.at(0).toObject();
+  conformalFirst.insert("sourceSolidGeometryIds",
+    QJsonArray{"solid/1", "solid/2"});
+  conformalFirst.insert("sourceSolidGeometryId", "solid/1");
+  conformalRegions = QJsonArray{conformalFirst};
+  conformalMap.insert("regions", conformalRegions);
+  conformalMap.insert("sharedFaceCandidates", QJsonArray{});
+  const GeometryMapReadResult conformal = read(conformalMap);
+  expect(conformal.succeeded(),
+    "a conformal geometry map accepts one fragment mapped to multiple source Solids");
+  if (conformal.map)
+  {
+    expect(conformal.map->mode == "conformal-multi-region"
+        && conformal.map->regions.front().sourceSolidGeometryIds.size() == 2,
+      "conformal source Solid mappings are retained");
+  }
+
   QJsonObject unknownField = validMap();
   unknownField.insert("futureGuess", true);
   expect(read(unknownField).error == GeometryMapReadErrorCode::InvalidStructure,

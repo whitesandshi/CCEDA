@@ -59,6 +59,7 @@ void MainWindow::startMeshing()
       projectState_.geometryRevision(),
       std::filesystem::path(snapshotDirectory_->path().toStdWString()),
       meshingConfiguration_.maximumGeometryBytes,
+      meshingPanel_->mode(),
   };
   const auto service = snapshotService_;
   snapshotWatcher_.setFuture(
@@ -118,6 +119,7 @@ void MainWindow::snapshotFinished()
       meshingPanel_->settings(),
       meshingPanel_->resourceLimits(),
       meshingPanel_->retryPolicy(),
+      meshingPanel_->mode(),
   };
   if (const auto failure = meshingController_->submit(submission))
   {

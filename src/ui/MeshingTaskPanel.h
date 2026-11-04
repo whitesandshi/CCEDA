@@ -29,6 +29,7 @@ public:
   void setGeometryAvailable(bool available);
   void setGenerationBlocked(bool blocked);
   [[nodiscard]] domain::MeshGenerationSettings settings() const noexcept;
+  [[nodiscard]] domain::MeshGenerationMode mode() const noexcept;
   [[nodiscard]] domain::MeshingResourceLimits resourceLimits() const noexcept;
   [[nodiscard]] domain::MeshingRetryPolicy retryPolicy() const noexcept;
 
@@ -54,6 +55,7 @@ private:
   bool busy_ = false;
   QDoubleSpinBox* minimumSize_ = nullptr;
   QDoubleSpinBox* maximumSize_ = nullptr;
+  QComboBox* mode_ = nullptr;
   QToolButton* advancedSettings_ = nullptr;
   QWidget* advancedSettingsPanel_ = nullptr;
   QSpinBox* curvatureElements_ = nullptr;

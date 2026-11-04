@@ -208,11 +208,16 @@ more than 4 Hz. Values MUST be non-negative and elapsed time MUST NOT regress.
 ## 11. Conformal Multi-Region Mode
 
 - Prefer already shared topology.
-- Perform required Gmsh Fragment/Imprint on the task snapshot copy, never canonical project geometry.
+- Perform required Fragment/Imprint on the task snapshot copy, never canonical project geometry. The current adapter performs this step with OCCT `BRepAlgoAPI_Splitter` before the BREP is handed to the Worker.
 - Return original Solid to one-or-more output-region mapping.
 - Shared interfaces have one consistent node and face-element set.
 - Unresolved gaps, overlap, or non-manifold results fail the task.
 - Distance-only node merging may not hide different interface triangulations.
+
+The implemented snapshot map records `sourceSolidGeometryIds` for every
+conformal fragment. A fragment may reference multiple source Solids; its
+primary `sourceSolidGeometryId` remains the first stable source ID for element
+association, while the complete list remains available on the region mapping.
 
 ## 12. Automatic Retry
 

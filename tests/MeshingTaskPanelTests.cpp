@@ -38,6 +38,7 @@ int main(int argc, char* argv[])
   auto* cancel = panel.findChild<QPushButton*>("cancelMeshButton");
   auto* minimum = panel.findChild<QDoubleSpinBox*>("minimumMeshSize");
   auto* maximum = panel.findChild<QDoubleSpinBox*>("maximumMeshSize");
+  auto* mode = panel.findChild<QComboBox*>("meshGenerationMode");
   auto* progress = panel.findChild<QProgressBar*>("meshingProgress");
   auto* advanced = panel.findChild<QToolButton*>("advancedMeshingSettings");
   auto* curvature = panel.findChild<QSpinBox*>("curvatureElementsPerCircle");
@@ -52,12 +53,12 @@ int main(int argc, char* argv[])
   auto* status = panel.findChild<QLabel*>("meshingStatus");
   auto* summary = panel.findChild<QLabel*>("meshingSummary");
 
-  expect(generate && cancel && minimum && maximum && progress && status && summary
+  expect(generate && cancel && minimum && maximum && mode && progress && status && summary
       && advanced && curvature && algorithm && optimize && automaticRetry
       && maximumAttempts && threads && maximumMinutes
       && maximumMemory && reset,
          "the meshing panel exposes its accessible task controls");
-  if (!generate || !cancel || !minimum || !maximum || !progress || !status || !summary
+  if (!generate || !cancel || !minimum || !maximum || !mode || !progress || !status || !summary
       || !advanced || !curvature || !algorithm || !optimize || !automaticRetry
       || !maximumAttempts || !threads || !maximumMinutes
       || !maximumMemory || !reset)
@@ -78,6 +79,7 @@ int main(int argc, char* argv[])
 
   panel.setGeometryAvailable(true);
   expect(!advanced->isChecked() && curvature->value() == 0
+      && panel.mode() == cceda::domain::MeshGenerationMode::IndependentSolids
       && !optimize->isChecked() && threads->value() == 0
       && algorithm->currentData().toInt()
         == static_cast<int>(cceda::domain::MeshGenerationAlgorithm::Delaunay)
@@ -97,6 +99,7 @@ int main(int argc, char* argv[])
   threads->setValue(6);
   maximumMinutes->setValue(15);
   maximumMemory->setValue(4096);
+  mode->setCurrentIndex(1);
   generate->click();
   expect(generateRequests == 1, "enabled generate control publishes one request");
   const auto configured = panel.settings();
@@ -105,6 +108,8 @@ int main(int argc, char* argv[])
       && configured.optimizeTetrahedra && configured.maximumThreads == 6
       && configured.algorithm == cceda::domain::MeshGenerationAlgorithm::Hxt,
     "the panel exposes the complete typed settings contract");
+  expect(panel.mode() == cceda::domain::MeshGenerationMode::ConformalMultiRegion,
+    "the panel exposes the conformal generation mode");
   const auto configuredRetry = panel.retryPolicy();
   expect(configuredRetry.automaticRetry && configuredRetry.maximumAttempts == 2,
     "the panel exposes the bounded automatic retry policy");
@@ -120,6 +125,8 @@ int main(int argc, char* argv[])
       && !defaults.optimizeTetrahedra && defaults.maximumThreads == 0
       && defaults.algorithm == cceda::domain::MeshGenerationAlgorithm::Delaunay,
     "reset restores every versioned meshing default");
+  expect(panel.mode() == cceda::domain::MeshGenerationMode::IndependentSolids,
+    "reset restores independent-solid mode");
   const auto defaultRetry = panel.retryPolicy();
   expect(!defaultRetry.automaticRetry && defaultRetry.maximumAttempts == 2,
     "reset disables automatic retry and restores its bounded attempt default");

@@ -250,7 +250,9 @@ GeometryMapReadResult readGeometryMap(
 
   const std::optional<std::uint64_t> revision =
     positiveInteger(root.value("sourceGeometryRevision"));
-  if (!revision || root.value("mode").toString() != "independent-solids"
+  const QString mode = root.value("mode").toString();
+  if (!revision
+      || (mode != "independent-solids" && mode != "conformal-multi-region")
       || root.value("canonicalUnit").toString() != "mm"
       || !root.value("transformsBaked").isBool()
       || !root.value("regions").isArray()
@@ -286,6 +288,7 @@ GeometryMapReadResult readGeometryMap(
     if (!value.isObject() || !hasOnlyKeys(region, {
         "regionId", "brepSolidIndex", "sourceAssemblyGeometryIds",
         "sourcePartGeometryId", "sourceSolidGeometryId",
+        "sourceSolidGeometryIds",
         "sourceFaceGeometryIds", "brepLocation", "brepBoundsMm"}))
     {
       return fail(GeometryMapReadErrorCode::InvalidRegion,
@@ -301,6 +304,10 @@ GeometryMapReadResult readGeometryMap(
       region.value("sourceFaceGeometryIds"),
       limits.maximumIdentityCharacters,
       limits.maximumFaceReferences);
+    const auto sourceSolids = region.contains("sourceSolidGeometryIds")
+      ? identityList(region.value("sourceSolidGeometryIds"),
+          limits.maximumIdentityCharacters, limits.maximumRegions)
+      : std::optional<QStringList>{};
     const QJsonObject location = region.value("brepLocation").toObject();
     const auto locationMatrix = matrix(location.value("matrixRowMajor"));
     const auto brepBounds = bounds(region.value("brepBoundsMm"));
@@ -317,8 +324,9 @@ GeometryMapReadResult readGeometryMap(
         || !brepBounds
         || !insertUnique(regionIds, *regionId)
         || !insertUnique(brepSolidIndices, *solidIndex)
-        || !insertUnique(solidGeometryIds,
-          region.value("sourceSolidGeometryId").toString()))
+        || (mode == "independent-solids"
+          && !insertUnique(solidGeometryIds,
+            region.value("sourceSolidGeometryId").toString())))
     {
       return fail(GeometryMapReadErrorCode::InvalidRegion,
         "geometry-map region identity, transform, bounds, or uniqueness is invalid");
@@ -327,6 +335,25 @@ GeometryMapReadResult readGeometryMap(
     {
       return fail(GeometryMapReadErrorCode::InvalidRegion,
         "geometry-map region must reference at least one Face");
+    }
+    QStringList resolvedSourceSolids;
+    if (mode == "conformal-multi-region")
+    {
+      if (!sourceSolids || sourceSolids->isEmpty())
+      {
+        return fail(GeometryMapReadErrorCode::InvalidRegion,
+          "conformal region must reference source Solids");
+      }
+      resolvedSourceSolids = *sourceSolids;
+      if (!resolvedSourceSolids.contains(region.value("sourceSolidGeometryId").toString()))
+      {
+        return fail(GeometryMapReadErrorCode::InvalidRegion,
+          "conformal region primary source Solid is not in its source list");
+      }
+    }
+    else
+    {
+      resolvedSourceSolids.push_back(region.value("sourceSolidGeometryId").toString());
     }
     if (static_cast<std::uint64_t>(faces->size())
         > limits.maximumFaceReferences - faceReferenceCount)
@@ -345,6 +372,7 @@ GeometryMapReadResult readGeometryMap(
       *faces,
       *locationMatrix,
       *brepBounds,
+      std::move(resolvedSourceSolids),
     });
   }
 
@@ -406,7 +434,8 @@ GeometryMapReadResult readGeometryMap(
         || !validIdentity(exclusion.value("geometryId"),
           limits.maximumIdentityCharacters)
         || (reason != "NON_SOLID_PART" && reason != "INVALID_SOLID")
-        || solidGeometryIds.contains(exclusion.value("geometryId").toString())
+        || (mode == "independent-solids"
+          && solidGeometryIds.contains(exclusion.value("geometryId").toString()))
         || !insertUnique(excludedIds, exclusion.value("geometryId").toString()))
     {
       return fail(GeometryMapReadErrorCode::InvalidExclusion,

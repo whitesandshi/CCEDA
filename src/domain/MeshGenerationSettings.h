@@ -15,6 +15,19 @@ enum class MeshGenerationAlgorithm : std::uint8_t
   Hxt = 2,
 };
 
+enum class MeshGenerationMode : std::uint8_t
+{
+  IndependentSolids = 1,
+  ConformalMultiRegion = 2,
+};
+
+[[nodiscard]] inline bool isValidMeshGenerationMode(
+  MeshGenerationMode mode) noexcept
+{
+  return mode == MeshGenerationMode::IndependentSolids
+    || mode == MeshGenerationMode::ConformalMultiRegion;
+}
+
 struct MeshGenerationSettings
 {
   double minimumSizeMm = 0.0;

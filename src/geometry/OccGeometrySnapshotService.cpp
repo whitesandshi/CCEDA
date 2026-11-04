@@ -6,6 +6,7 @@
 #include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <NCollection_DataMap.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <QByteArrayView>
@@ -29,6 +30,7 @@
 #include <memory>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace
@@ -40,6 +42,12 @@ using ShapeIdMap =
   NCollection_DataMap<TopoDS_Shape, std::string, TopTools_ShapeMapHasher>;
 
 constexpr qint64 HashBufferBytes = 1024 * 1024;
+
+const char* modeId(domain::MeshGenerationMode mode)
+{
+  return mode == domain::MeshGenerationMode::ConformalMultiRegion
+    ? "conformal-multi-region" : "independent-solids";
+}
 
 class OwnedFileCleanup
 {
@@ -89,6 +97,16 @@ bool directoryIsEmpty(const std::filesystem::path& path)
 {
   return std::filesystem::directory_iterator(path)
     == std::filesystem::directory_iterator();
+}
+
+bool boundsOverlap(
+  const std::array<double, 6>& left,
+  const std::array<double, 6>& right)
+{
+  constexpr double tolerance = 1.0e-9;
+  return left[0] <= right[3] + tolerance && right[0] <= left[3] + tolerance
+    && left[1] <= right[4] + tolerance && right[1] <= left[4] + tolerance
+    && left[2] <= right[5] + tolerance && right[2] <= left[5] + tolerance;
 }
 
 std::optional<std::string> sha256File(const std::filesystem::path& path)
@@ -192,7 +210,7 @@ QByteArray geometryMapJson(const geometry::GeometrySnapshot& snapshot)
   QJsonArray regions;
   for (const geometry::GeometrySnapshotRegion& region : snapshot.regions)
   {
-    regions.append(QJsonObject{
+    QJsonObject json{
       {"regionId", static_cast<qint64>(region.regionId)},
       {"brepSolidIndex", static_cast<qint64>(region.brepSolidIndex)},
       {"sourceAssemblyGeometryIds", stringsJson(region.assemblyGeometryIds)},
@@ -204,7 +222,17 @@ QByteArray geometryMapJson(const geometry::GeometrySnapshot& snapshot)
         {"transformsBaked", snapshot.transformsBaked},
         {"matrixRowMajor", matrixJson(region.brepLocation)},
       }},
-    });
+    };
+    if (snapshot.mode == domain::MeshGenerationMode::ConformalMultiRegion)
+    {
+      QJsonArray sourceSolids;
+      for (const std::string& source : region.sourceSolidGeometryIds)
+      {
+        sourceSolids.append(QString::fromUtf8(source));
+      }
+      json.insert("sourceSolidGeometryIds", sourceSolids);
+    }
+    regions.append(json);
   }
 
   QJsonArray sharedFaces;
@@ -234,7 +262,7 @@ QByteArray geometryMapJson(const geometry::GeometrySnapshot& snapshot)
     }},
     {"sourceGeometryRevision",
       static_cast<qint64>(snapshot.sourceGeometryRevision)},
-    {"mode", "independent-solids"},
+    {"mode", modeId(snapshot.mode)},
     {"canonicalUnit", QString::fromUtf8(snapshot.canonicalUnit)},
     {"transformsBaked", snapshot.transformsBaked},
     {"regions", regions},
@@ -302,11 +330,23 @@ GeometrySnapshotResult OccGeometrySnapshotService::createSnapshot(
     snapshot.schemaMajor = GeometryMapSchemaMajor;
     snapshot.schemaMinor = GeometryMapSchemaMinor;
     snapshot.sourceGeometryRevision = request.sourceGeometryRevision;
+    if (!domain::isValidMeshGenerationMode(request.mode))
+    {
+      return fail(GeometrySnapshotErrorCode::InvalidRequest,
+        "Unsupported geometry snapshot mode");
+    }
+    snapshot.mode = request.mode;
 
     BRep_Builder builder;
     TopoDS_Compound compound;
     builder.MakeCompound(compound);
     std::unordered_map<std::string, std::vector<std::uint64_t>> faceRegions;
+    struct SourceSolid
+    {
+      TopoDS_Shape shape;
+      GeometrySnapshotRegion region;
+    };
+    std::vector<SourceSolid> sourceSolids;
     ShapeIdMap faceIds;
 
     for (const domain::GeometryEntity& entity : topology.document.entities)
@@ -356,7 +396,7 @@ GeometrySnapshotResult OccGeometrySnapshotService::createSnapshot(
       }
 
       GeometrySnapshotRegion region;
-      region.regionId = snapshot.regions.size() + 1;
+      region.regionId = sourceSolids.size() + 1;
       region.brepSolidIndex = region.regionId;
       region.assemblyGeometryIds = assemblyAncestors(entity.parentId, entities);
       region.partGeometryId = entity.parentId;
@@ -398,20 +438,148 @@ GeometrySnapshotResult OccGeometrySnapshotService::createSnapshot(
         faceRegions[faceId].push_back(region.regionId);
       }
 
-      builder.Add(compound, shape->second);
-      snapshot.regions.push_back(std::move(region));
+      region.sourceSolidGeometryIds.push_back(entity.id);
+      sourceSolids.push_back({shape->second, std::move(region)});
     }
 
-    if (snapshot.regions.empty())
+    if (sourceSolids.empty())
     {
       return fail(GeometrySnapshotErrorCode::NoMeshableSolids,
         "The current revision contains no valid meshable Solids");
     }
-    for (auto& [faceId, regionIds] : faceRegions)
+    if (request.mode == domain::MeshGenerationMode::IndependentSolids)
     {
-      if (regionIds.size() > 1)
+      for (SourceSolid& source : sourceSolids)
       {
-        snapshot.sharedFaceCandidates.push_back({faceId, std::move(regionIds)});
+        builder.Add(compound, source.shape);
+        snapshot.regions.push_back(std::move(source.region));
+      }
+    }
+    else
+    {
+      NCollection_List<TopoDS_Shape> arguments;
+      for (const SourceSolid& source : sourceSolids)
+      {
+        arguments.Append(source.shape);
+      }
+      std::unique_ptr<BRepAlgoAPI_Splitter> splitter;
+      if (sourceSolids.size() > 1)
+      {
+        splitter = std::make_unique<BRepAlgoAPI_Splitter>();
+        splitter->SetArguments(arguments);
+        splitter->SetNonDestructive(true);
+        splitter->SetToFillHistory(true);
+        splitter->Build();
+        if (!splitter->IsDone() || splitter->Shape().IsNull())
+        {
+          return fail(GeometrySnapshotErrorCode::ConformalPreparationFailed,
+            "OCCT Fragment/Imprint failed for the task snapshot");
+        }
+      }
+
+      struct Fragment
+      {
+        TopoDS_Shape shape;
+        std::vector<std::size_t> sources;
+      };
+      std::vector<Fragment> fragments;
+      if (sourceSolids.size() == 1)
+      {
+        fragments.push_back({sourceSolids.front().shape, {0}});
+      }
+      else
+      {
+        ShapeMap resultSolids;
+        TopExp::MapShapes(splitter->Shape(), TopAbs_SOLID, resultSolids);
+        for (int solidIndex = 1; solidIndex <= resultSolids.Extent(); ++solidIndex)
+        {
+          const TopoDS_Shape& piece = resultSolids.FindKey(solidIndex);
+          Bnd_Box pieceBounds;
+          BRepBndLib::AddOptimal(piece, pieceBounds, false, false);
+          if (piece.IsNull() || piece.ShapeType() != TopAbs_SOLID
+              || pieceBounds.IsVoid() || pieceBounds.IsOpen())
+          {
+            continue;
+          }
+          std::array<double, 6> bounds{};
+          pieceBounds.Get(bounds[0], bounds[1], bounds[2],
+            bounds[3], bounds[4], bounds[5]);
+          std::vector<std::size_t> sources;
+          for (std::size_t sourceIndex = 0;
+               sourceIndex < sourceSolids.size(); ++sourceIndex)
+          {
+            if (boundsOverlap(bounds, sourceSolids[sourceIndex].region.brepBoundsMm))
+            {
+              sources.push_back(sourceIndex);
+            }
+          }
+          if (!sources.empty())
+          {
+            fragments.push_back({piece, std::move(sources)});
+          }
+        }
+      }
+      if (fragments.empty())
+      {
+        return fail(GeometrySnapshotErrorCode::ConformalPreparationFailed,
+          "OCCT Fragment/Imprint produced no solid fragments");
+      }
+      for (Fragment& fragment : fragments)
+      {
+        GeometrySnapshotRegion region;
+        region.regionId = snapshot.regions.size() + 1;
+        region.brepSolidIndex = region.regionId;
+        region.brepLocation = locationMatrix(fragment.shape);
+        std::unordered_set<std::string> uniqueFaces;
+        for (const std::size_t sourceIndex : fragment.sources)
+        {
+          const GeometrySnapshotRegion& source = sourceSolids[sourceIndex].region;
+          if (region.partGeometryId.empty())
+          {
+            region.partGeometryId = source.partGeometryId;
+            region.assemblyGeometryIds = source.assemblyGeometryIds;
+          }
+          region.sourceSolidGeometryIds.insert(
+            region.sourceSolidGeometryIds.end(),
+            source.sourceSolidGeometryIds.begin(),
+            source.sourceSolidGeometryIds.end());
+          for (const std::string& face : source.faceGeometryIds)
+          {
+            if (uniqueFaces.insert(face).second)
+            {
+              region.faceGeometryIds.push_back(face);
+            }
+          }
+        }
+        if (region.sourceSolidGeometryIds.empty() || region.faceGeometryIds.empty())
+        {
+          return fail(GeometrySnapshotErrorCode::ConformalPreparationFailed,
+            "A conformal fragment has no source mapping");
+        }
+        region.solidGeometryId = region.sourceSolidGeometryIds.front();
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(fragment.shape, bounds, false, false);
+        if (bounds.IsVoid() || bounds.IsOpen())
+        {
+          return fail(GeometrySnapshotErrorCode::ConformalPreparationFailed,
+            "A conformal fragment has invalid bounds");
+        }
+        bounds.Get(region.brepBoundsMm[0], region.brepBoundsMm[1],
+          region.brepBoundsMm[2], region.brepBoundsMm[3],
+          region.brepBoundsMm[4], region.brepBoundsMm[5]);
+        builder.Add(compound, fragment.shape);
+        snapshot.regions.push_back(std::move(region));
+      }
+    }
+
+    if (request.mode == domain::MeshGenerationMode::IndependentSolids)
+    {
+      for (auto& [faceId, regionIds] : faceRegions)
+      {
+        if (regionIds.size() > 1)
+        {
+          snapshot.sharedFaceCandidates.push_back({faceId, std::move(regionIds)});
+        }
       }
     }
     std::sort(snapshot.sharedFaceCandidates.begin(),

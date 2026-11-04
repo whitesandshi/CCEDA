@@ -23,6 +23,7 @@ struct GmshSnapshotJobWorkspaceRequest
   domain::MeshGenerationSettings settings;
   domain::MeshingResourceLimits resourceLimits;
   std::uint64_t maximumSnapshotBytes = 0;
+  domain::MeshGenerationMode mode = domain::MeshGenerationMode::IndependentSolids;
 };
 
 struct PreparedGmshExecutableJob

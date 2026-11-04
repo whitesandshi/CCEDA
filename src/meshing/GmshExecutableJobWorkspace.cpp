@@ -58,6 +58,13 @@ QString algorithmId(domain::MeshGenerationAlgorithm algorithm)
   return {};
 }
 
+QString modeId(domain::MeshGenerationMode mode)
+{
+  return mode == domain::MeshGenerationMode::ConformalMultiRegion
+    ? QStringLiteral("conformal-multi-region")
+    : QStringLiteral("independent-solids");
+}
+
 bool isEmptyDirectory(const QString& path)
 {
   const QDir directory(path);
@@ -182,6 +189,7 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
     || !hasValidJobId(request.jobId)
     || request.sourceGeometryRevision == 0
     || !revisionFitsJson
+    || !domain::isValidMeshGenerationMode(request.mode)
     || request.maximumSnapshotBytes == 0
     || !domain::isValidMeshGenerationSettings(request.settings)
     || !domain::isValidMeshingResourceLimits(request.resourceLimits)
@@ -260,7 +268,8 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
   }
   const GeometryMapReadResult parsed = readGeometryMap(copiedMap, mapLimits);
   if (!parsed.succeeded()
-    || parsed.map->sourceGeometryRevision != request.sourceGeometryRevision)
+    || parsed.map->sourceGeometryRevision != request.sourceGeometryRevision
+    || parsed.map->mode != modeId(request.mode))
   {
     return fail(GmshJobWorkspaceErrorCode::GeometryMapInvalid,
       parsed.succeeded()
@@ -276,7 +285,7 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
     {"geometry", QJsonObject{
       {"schema", QJsonObject{{"major", GeometryMapSchemaMajor},
         {"minor", GeometryMapSchemaMinor}}},
-      {"mode", "independent-solids"},
+      {"mode", modeId(request.mode)},
       {"canonicalUnit", "mm"},
       {"brep", QJsonObject{{"path", "geometry/input.brep"},
         {"sha256", brep.artifact->sha256}}},

@@ -494,7 +494,8 @@ if(BUILD_TESTING)
         Qt6::Core
         cceda_geometry_occ
         TKTopAlgo
-        TKBRep)
+        TKBRep
+        TKPrim)
     set_property(TARGET cceda_geometry_snapshot_tests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
     add_test(
         NAME geometry.meshing_snapshot

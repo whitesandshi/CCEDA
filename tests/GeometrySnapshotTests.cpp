@@ -4,6 +4,7 @@
 #include "geometry/OccGeometrySnapshotService.h"
 
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
 #include <IFSelect_ReturnStatus.hxx>
@@ -185,6 +186,39 @@ int main(int argc, char** argv)
       "creating a snapshot does not mutate canonical geometry");
   }
 
+  const std::filesystem::path conformalOutput =
+    std::filesystem::path(root.path().toStdWString()) / "conformal";
+  const GeometrySnapshotResult conformal = snapshotService.createSnapshot({
+    imported.document.revision,
+    conformalOutput,
+    32ULL * 1024ULL * 1024ULL,
+    cceda::domain::MeshGenerationMode::ConformalMultiRegion,
+  });
+  expect(conformal.succeeded(),
+    "conformal mode creates a task-only fragmented snapshot");
+  if (!conformal.succeeded())
+  {
+    std::cerr << "Conformal snapshot error " << static_cast<int>(conformal.error)
+      << ": " << conformal.detail << '\n';
+  }
+  if (conformal.snapshot)
+  {
+    expect(conformal.snapshot->mode
+        == cceda::domain::MeshGenerationMode::ConformalMultiRegion,
+      "conformal snapshot records its explicit mode");
+    const QByteArray mapBytes = readAll(conformal.snapshot->geometryMapPath);
+    const QJsonDocument mapDocument = QJsonDocument::fromJson(mapBytes);
+    const QJsonObject map = mapDocument.object();
+    expect(map.value("mode").toString() == "conformal-multi-region",
+      "conformal geometry map records its mode");
+    const QJsonArray regions = map.value("regions").toArray();
+    expect(!regions.isEmpty()
+        && regions.first().toObject().value("sourceSolidGeometryIds").isArray(),
+      "conformal regions preserve source Solid mappings");
+    expect(geometryService.currentDocument().revision == imported.document.revision,
+      "conformal snapshot preparation does not mutate canonical geometry");
+  }
+
   const std::filesystem::path staleOutput =
     std::filesystem::path(root.path().toStdWString()) / "stale";
   const GeometrySnapshotResult stale = snapshotService.createSnapshot({
@@ -240,6 +274,42 @@ int main(int argc, char** argv)
       "a non-solid model never enters a first-release meshing snapshot");
     expect(!std::filesystem::exists(surfaceOutput),
       "a non-solid model publishes no snapshot artifacts");
+  }
+
+  BRep_Builder assemblyBuilder;
+  TopoDS_Compound overlappingCompound;
+  assemblyBuilder.MakeCompound(overlappingCompound);
+  assemblyBuilder.Add(overlappingCompound,
+    BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).Solid());
+  assemblyBuilder.Add(overlappingCompound,
+    BRepPrimAPI_MakeBox(gp_Pnt(5.0, 0.0, 0.0), 10.0, 10.0, 10.0).Solid());
+  const std::filesystem::path overlappingPath =
+    std::filesystem::path(root.path().toStdWString()) / "overlapping.step";
+  STEPControl_Writer overlappingWriter;
+  const bool overlappingWritten =
+    overlappingWriter.Transfer(overlappingCompound, STEPControl_AsIs) == IFSelect_RetDone
+    && overlappingWriter.Write(overlappingPath.u8string().c_str()) == IFSelect_RetDone;
+  expect(overlappingWritten, "an overlapping multi-Solid conformal fixture can be written");
+  if (overlappingWritten)
+  {
+    const auto overlappingImported = geometryService.importStep(overlappingPath);
+    expect(overlappingImported.success && meshableSolidCount(overlappingImported.document) == 2,
+      "the overlapping fixture imports as two meshable Solids");
+    const auto overlappingSnapshot = snapshotService.createSnapshot({
+      overlappingImported.document.revision,
+      std::filesystem::path(root.path().toStdWString()) / "overlapping-conformal",
+      32ULL * 1024ULL * 1024ULL,
+      cceda::domain::MeshGenerationMode::ConformalMultiRegion,
+    });
+    expect(overlappingSnapshot.succeeded(),
+      "conformal Fragment/Imprint handles overlapping task Solids");
+    if (overlappingSnapshot.snapshot)
+    {
+      expect(overlappingSnapshot.snapshot->regions.size() >= 2,
+        "overlapping conformal input produces mapped fragments");
+      expect(geometryService.currentDocument().revision == overlappingImported.document.revision,
+        "multi-Solid conformal preparation preserves canonical revision");
+    }
   }
 
   if (failures == 0)

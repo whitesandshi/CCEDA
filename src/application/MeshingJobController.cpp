@@ -76,7 +76,15 @@ bool isSha256(const QString& digest)
 
 bool hasValidSettings(const MeshingJobSubmission& submission)
 {
-  return domain::isValidMeshGenerationSettings(submission.settings);
+  return domain::isValidMeshGenerationSettings(submission.settings)
+    && domain::isValidMeshGenerationMode(submission.mode);
+}
+
+QString modeId(domain::MeshGenerationMode mode)
+{
+  return mode == domain::MeshGenerationMode::ConformalMultiRegion
+    ? QStringLiteral("conformal-multi-region")
+    : QStringLiteral("independent-solids");
 }
 
 domain::MeshGenerationAlgorithm fallbackAlgorithm(
@@ -554,7 +562,7 @@ ArtifactValidation validateArtifacts(
     || mapRoot.value("jobId").toString() != active.submission.jobId
     || mapRoot.value("sourceGeometryRevision").toInteger(-1)
       != static_cast<qint64>(active.sourceGeometryRevision)
-    || mapRoot.value("mode").toString() != "independent-solids"
+    || mapRoot.value("mode").toString() != modeId(active.submission.mode)
     || mappedRegions.isEmpty())
   {
     return invalidArtifact("Geometry-map result identity or schema is invalid");
@@ -622,7 +630,8 @@ ArtifactValidation validateArtifacts(
       mappedRegion.value("gmshVolumeEntityTags").toArray();
     if (!value.isObject()
       || !hasOnlyKeys(mappedRegion,
-        {"regionId", "sourceSolidGeometryId", "gmshVolumeEntityTags"})
+        {"regionId", "sourceSolidGeometryId", "sourceSolidGeometryIds",
+          "gmshVolumeEntityTags"})
       || !mappedRegion.value("regionId").isDouble()
       || mappedRegion.value("regionId").toDouble()
         != static_cast<double>(regionId)
@@ -634,6 +643,33 @@ ArtifactValidation validateArtifacts(
     {
       return invalidArtifact(
         "Geometry-map result does not match the submitted snapshot regions");
+    }
+    const QJsonArray sourceIds = mappedRegion.value("sourceSolidGeometryIds").toArray();
+    if (active.submission.mode == domain::MeshGenerationMode::ConformalMultiRegion)
+    {
+      if (sourceIds.isEmpty()
+        || sourceIds.size() != expected->sourceSolidGeometryIds.size())
+      {
+        return invalidArtifact(
+          "Conformal geometry-map result is missing source Solid mappings");
+      }
+      for (const QString& sourceId : expected->sourceSolidGeometryIds)
+      {
+        bool found = false;
+        for (const QJsonValue& value : sourceIds)
+        {
+          if (value.toString() == sourceId)
+          {
+            found = true;
+            break;
+          }
+        }
+        if (!found)
+        {
+          return invalidArtifact(
+            "Conformal geometry-map result source Solid mapping changed");
+        }
+      }
     }
     uniqueRegionIds.insert(regionId);
     for (const QJsonValue& tagValue : volumeTags)
@@ -974,6 +1010,7 @@ private:
       active_->attemptSettings,
       active_->attemptResourceLimits,
       configuration_.maximumGeometryBytes,
+      active_->submission.mode,
     };
     preparationWatcher_.setFuture(
       QtConcurrent::run([request] {

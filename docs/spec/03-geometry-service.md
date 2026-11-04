@@ -178,7 +178,7 @@ Contains target revision, issue IDs, ordered actions/parameters, classification 
   canonical millimeters. Bounds are computed from geometry without adding
   triangulation and are sealed by the mapping-file SHA-256.
 - Prefer existing shared topology in conformal mode.
-- Run task-only imprint/fragmentation on a copy, never silently on canonical project geometry.
+- Run task-only imprint/fragmentation on a copy, never silently on canonical project geometry. The explicit conformal meshing mode now applies OCCT Fragment/Imprint to the revision-bound snapshot and records each fragment's source Solid mapping.
 - Output original-Solid to task-region mapping for any task-only topology changes.
 - Persisting such a change requires a separate confirmed healing transaction.
 

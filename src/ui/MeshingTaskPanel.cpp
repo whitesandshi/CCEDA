@@ -51,6 +51,16 @@ MeshingTaskPanel::MeshingTaskPanel(QWidget* parent) : QWidget(parent)
   maximumSize_->setKeyboardTracking(false);
   maximumLabel->setBuddy(maximumSize_);
 
+  auto* modeLabel = new QLabel(tr("Mode:"), this);
+  mode_ = new QComboBox(this);
+  mode_->setObjectName("meshGenerationMode");
+  mode_->setAccessibleName(tr("Mesh generation mode"));
+  mode_->addItem(tr("Independent solids"),
+    static_cast<int>(domain::MeshGenerationMode::IndependentSolids));
+  mode_->addItem(tr("Conformal multi-region"),
+    static_cast<int>(domain::MeshGenerationMode::ConformalMultiRegion));
+  modeLabel->setBuddy(mode_);
+
   generateButton_ =
       new QPushButton(style()->standardIcon(QStyle::SP_MediaPlay), tr("Generate Mesh"), this);
   generateButton_->setObjectName("generateMeshButton");
@@ -68,6 +78,9 @@ MeshingTaskPanel::MeshingTaskPanel(QWidget* parent) : QWidget(parent)
   settings->addSpacing(8);
   settings->addWidget(maximumLabel);
   settings->addWidget(maximumSize_);
+  settings->addSpacing(8);
+  settings->addWidget(modeLabel);
+  settings->addWidget(mode_);
   settings->addStretch(1);
   settings->addWidget(generateButton_);
   settings->addWidget(cancelButton_);
@@ -252,6 +265,14 @@ domain::MeshGenerationSettings MeshingTaskPanel::settings() const noexcept
   };
 }
 
+domain::MeshGenerationMode MeshingTaskPanel::mode() const noexcept
+{
+  const int value = mode_->currentData().toInt();
+  return value == static_cast<int>(domain::MeshGenerationMode::ConformalMultiRegion)
+    ? domain::MeshGenerationMode::ConformalMultiRegion
+    : domain::MeshGenerationMode::IndependentSolids;
+}
+
 domain::MeshingResourceLimits MeshingTaskPanel::resourceLimits() const noexcept
 {
   return {
@@ -273,6 +294,7 @@ void MeshingTaskPanel::setBusy(bool busy)
   busy_ = busy;
   minimumSize_->setEnabled(!busy_);
   maximumSize_->setEnabled(!busy_);
+  mode_->setEnabled(!busy_);
   advancedSettings_->setEnabled(!busy_);
   advancedSettingsPanel_->setEnabled(!busy_);
   generateButton_->setEnabled(!busy_ && geometryAvailable_ && !generationBlocked_);
@@ -295,6 +317,7 @@ void MeshingTaskPanel::resetDefaults()
 {
   minimumSize_->setValue(0.0);
   maximumSize_->setValue(0.0);
+  mode_->setCurrentIndex(0);
   curvatureElements_->setValue(0);
   algorithm_->setCurrentIndex(0);
   optimizeTetrahedra_->setChecked(false);

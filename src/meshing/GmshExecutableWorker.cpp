@@ -110,6 +110,27 @@ QString meshAlgorithmId(cceda::domain::MeshGenerationAlgorithm algorithm)
     ? "hxt" : "delaunay";
 }
 
+QString meshModeId(cceda::domain::MeshGenerationMode mode)
+{
+  return mode == cceda::domain::MeshGenerationMode::ConformalMultiRegion
+    ? QStringLiteral("conformal-multi-region")
+    : QStringLiteral("independent-solids");
+}
+
+std::vector<std::string> sourceGeometryIds(
+  const cceda::meshing::GeometryMapRegion& region)
+{
+  const QStringList ids = region.sourceSolidGeometryIds.isEmpty()
+    ? QStringList{region.solidGeometryId} : region.sourceSolidGeometryIds;
+  std::vector<std::string> result;
+  result.reserve(static_cast<std::size_t>(ids.size()));
+  for (const QString& id : ids)
+  {
+    result.push_back(id.toStdString());
+  }
+  return result;
+}
+
 QString gmshAlgorithmId(cceda::domain::MeshGenerationAlgorithm algorithm)
 {
   return algorithm == cceda::domain::MeshGenerationAlgorithm::Hxt
@@ -159,7 +180,7 @@ std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
     const std::string solidGeometryId = region.solidGeometryId.toStdString();
     result.meshMapping.regions.push_back({
       region.regionId,
-      {solidGeometryId},
+      sourceGeometryIds(region),
     });
     QList<int> volumeTags = counts.tetrahedronVolumeEntityTags.values();
     std::sort(volumeTags.begin(), volumeTags.end());
@@ -185,6 +206,9 @@ std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
     result.serializedRegions.append(QJsonObject{
       {"regionId", static_cast<qint64>(region.regionId)},
       {"sourceSolidGeometryId", region.solidGeometryId},
+      {"sourceSolidGeometryIds", QJsonArray::fromStringList(
+        region.sourceSolidGeometryIds.isEmpty()
+          ? QStringList{region.solidGeometryId} : region.sourceSolidGeometryIds)},
       {"gmshVolumeEntityTags", serializedVolumeTags},
     });
     return result;
@@ -246,7 +270,7 @@ std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
     const std::string solidGeometryId = region.solidGeometryId.toStdString();
     result.meshMapping.regions.push_back({
       region.regionId,
-      {solidGeometryId},
+      sourceGeometryIds(region),
     });
     result.meshMapping.entities.push_back({
       3, matchedVolumeTag, region.regionId, solidGeometryId,
@@ -259,8 +283,12 @@ std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
       }
       if (assignedSurfaceTags.contains(surfaceTag))
       {
-        error = "A meshed Gmsh Surface belongs to multiple snapshot regions";
-        return std::nullopt;
+        if (geometryMap.mode == "independent-solids")
+        {
+          error = "A meshed Gmsh Surface belongs to multiple snapshot regions";
+          return std::nullopt;
+        }
+        continue;
       }
       assignedSurfaceTags.insert(surfaceTag);
       result.meshMapping.entities.push_back({
@@ -271,6 +299,9 @@ std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
     result.serializedRegions.append(QJsonObject{
       {"regionId", static_cast<qint64>(region.regionId)},
       {"sourceSolidGeometryId", region.solidGeometryId},
+      {"sourceSolidGeometryIds", QJsonArray::fromStringList(
+        region.sourceSolidGeometryIds.isEmpty()
+          ? QStringList{region.solidGeometryId} : region.sourceSolidGeometryIds)},
       {"gmshVolumeEntityTags", QJsonArray{matchedVolumeTag}},
     });
   }
@@ -1084,7 +1115,7 @@ int main(int argc, char* argv[])
     {"capabilities", QJsonObject{
       {"dimensions", QJsonArray{3}},
       {"elementTypes", QJsonArray{"Triangle3", "Tetrahedron4"}},
-      {"modes", QJsonArray{"independent-solids"}},
+      {"modes", QJsonArray{"independent-solids", "conformal-multi-region"}},
       {"optimization", true},
       {"quality", true},
     }},
@@ -1158,7 +1189,8 @@ int main(int argc, char* argv[])
       != cceda::meshing::GeometryMapSchemaMajor
     || geometrySchema.value("minor").toInt(-1)
       != cceda::meshing::GeometryMapSchemaMinor
-    || geometry.value("mode").toString() != "independent-solids"
+    || (geometry.value("mode").toString() != "independent-solids"
+      && geometry.value("mode").toString() != "conformal-multi-region")
     || geometry.value("canonicalUnit").toString() != "mm"
     || !hasOnlyKeys(brep, {"path", "sha256"})
     || !hasOnlyKeys(geometryMapArtifact, {"path", "sha256"})
@@ -1246,7 +1278,8 @@ int main(int argc, char* argv[])
   const auto parsed = cceda::meshing::readGeometryMap(mapFile, mapLimits);
   if (!parsed.succeeded()
     || parsed.map->sourceGeometryRevision
-      != static_cast<std::uint64_t>(geometryRevision))
+      != static_cast<std::uint64_t>(geometryRevision)
+    || parsed.map->mode != geometry.value("mode").toString())
   {
     return fail(jobId, "MESH_INPUT_INVALID", "loading-geometry",
       parsed.succeeded()
@@ -1558,7 +1591,9 @@ int main(int argc, char* argv[])
         static_cast<cceda::domain::GeometryRevision>(geometryRevision),
         utcTimestamp().toStdString(),
         backendVersion.toStdString(),
-        cceda::domain::MeshConformity::NonConformal,
+        parsedGeometryMap.mode == "conformal-multi-region"
+          ? cceda::domain::MeshConformity::Conformal
+          : cceda::domain::MeshConformity::NonConformal,
       },
       resolvedMapping->meshMapping,
       {
@@ -1667,7 +1702,7 @@ int main(int argc, char* argv[])
     }},
     {"jobId", jobId},
     {"sourceGeometryRevision", geometryRevision},
-    {"mode", "independent-solids"},
+    {"mode", parsedGeometryMap.mode},
     {"regions", resolvedMapping->serializedRegions},
   };
   if (!writeJsonAtomically(geometryMapResultPath, geometryMapResult, error))

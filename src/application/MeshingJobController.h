@@ -35,6 +35,7 @@ struct MeshingJobSubmission
   domain::MeshGenerationSettings settings;
   domain::MeshingResourceLimits resourceLimits;
   domain::MeshingRetryPolicy retryPolicy;
+  domain::MeshGenerationMode mode = domain::MeshGenerationMode::IndependentSolids;
 };
 
 struct MeshingJobProgress

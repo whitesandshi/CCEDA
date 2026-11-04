@@ -101,7 +101,9 @@ bool writeRequest(
     const QString& workspace,
     const QString& sourceStep,
     cceda::domain::MeshingResourceLimits resourceLimits = {
-        120'000, 2ULL * 1024ULL * 1024ULL * 1024ULL})
+        120'000, 2ULL * 1024ULL * 1024ULL * 1024ULL},
+    cceda::domain::MeshGenerationMode mode =
+        cceda::domain::MeshGenerationMode::IndependentSolids)
 {
     const auto repository =
         std::make_shared<cceda::geometry::OccGeometryRepository>();
@@ -124,6 +126,7 @@ bool writeRequest(
         imported.document.revision,
         std::filesystem::path(snapshotRoot.path().toStdWString()) / "geometry",
         32ULL * 1024ULL * 1024ULL,
+        mode,
     });
     if (!snapshot.succeeded()) {
         std::cerr << "Cannot create Worker geometry snapshot: "
@@ -143,6 +146,7 @@ bool writeRequest(
           cceda::domain::MeshGenerationAlgorithm::Hxt},
         resourceLimits,
         32ULL * 1024ULL * 1024ULL,
+        mode,
     });
     if (!prepared.succeeded()) {
         std::cerr << "Cannot seal Worker geometry snapshot: "
@@ -230,7 +234,9 @@ bool rejectsTinyWorkingSetLimit(
 
 bool multiRegionWorkerPublishesEverySolid(
     const QString& workerPath,
-    const QString& gmshPath)
+    const QString& gmshPath,
+    cceda::domain::MeshGenerationMode mode =
+        cceda::domain::MeshGenerationMode::IndependentSolids)
 {
     QTemporaryDir source(QDir::current().filePath(
         "cceda-worker-multi-source-XXXXXX"));
@@ -239,7 +245,7 @@ bool multiRegionWorkerPublishesEverySolid(
     const QString stepPath = QDir(source.path()).filePath("two-solids.step");
     if (!source.isValid() || !workspace.isValid()
         || !writeTwoSolidStep(stepPath)
-        || !writeRequest(workspace.path(), stepPath)) {
+        || !writeRequest(workspace.path(), stepPath, {}, mode)) {
         return false;
     }
 
@@ -319,6 +325,9 @@ bool multiRegionWorkerPublishesEverySolid(
         cceda::domain::MeshValidationMode::WorkerArtifact);
     return decoded.succeeded()
         && decoded.mesh->regions.size() == 2
+        && (mode == cceda::domain::MeshGenerationMode::IndependentSolids
+            ? decoded.mesh->conformity == cceda::domain::MeshConformity::NonConformal
+            : decoded.mesh->conformity == cceda::domain::MeshConformity::Conformal)
         && std::all_of(decoded.mesh->regions.begin(), decoded.mesh->regions.end(),
             [&](const cceda::domain::MeshRegion& region) {
                 return region.sourceGeometryIds.size() == 1
@@ -447,6 +456,12 @@ int main(int argc, char* argv[])
     }
     if (!expect(multiRegionWorkerPublishesEverySolid(workerPath, gmshPath),
                 "Worker did not publish every independent-Solid region")) {
+        return 1;
+    }
+    if (!expect(multiRegionWorkerPublishesEverySolid(
+                    workerPath, gmshPath,
+                    cceda::domain::MeshGenerationMode::ConformalMultiRegion),
+                "Worker did not publish a conformal multi-region result")) {
         return 1;
     }
     TestWorkspace workspace;

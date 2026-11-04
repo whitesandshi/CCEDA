@@ -24,6 +24,7 @@ struct GeometryMapRegion
   QStringList faceGeometryIds;
   std::array<double, 16> brepLocation{};
   std::array<double, 6> brepBoundsMm{};
+  QStringList sourceSolidGeometryIds;
 };
 
 struct GeometryMapSharedFaceCandidate
