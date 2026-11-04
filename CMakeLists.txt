@@ -36,13 +36,32 @@ qt_standard_project_setup()
 
 add_library(cceda_domain STATIC
     src/domain/ProjectState.cpp
-    src/domain/MeshModel.cpp)
+    src/domain/MeshModel.cpp
+    src/domain/MeshExportSettings.h
+    src/domain/MeshGenerationSettings.h
+    src/domain/MeshingResourceLimits.h)
 target_include_directories(cceda_domain PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+add_library(cceda_mesh_quality STATIC
+    src/mesh_quality/MeshQuality.cpp
+    src/mesh_quality/MeshQuality.h)
+target_include_directories(cceda_mesh_quality
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_mesh_quality PUBLIC cceda_domain)
 
 add_library(cceda_mesh_gmsh STATIC
     src/meshing/GmshMsh41Reader.cpp)
 target_include_directories(cceda_mesh_gmsh PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_gmsh PUBLIC cceda_domain)
+
+add_library(cceda_mesh_export_gmsh STATIC
+    src/meshing/GmshMsh41MeshExporter.cpp
+    src/meshing/GmshMsh41MeshExporter.h)
+target_include_directories(cceda_mesh_export_gmsh
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_mesh_export_gmsh
+    PUBLIC cceda_application
+    PRIVATE Qt6::Core)
 
 add_library(cceda_mesh_codec STATIC
     src/meshing/MeshBinaryCodec.cpp
@@ -51,6 +70,14 @@ add_library(cceda_mesh_codec STATIC
     src/meshing/MeshBinaryReader.cpp)
 target_include_directories(cceda_mesh_codec PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_codec PUBLIC cceda_domain)
+
+add_library(cceda_mesh_quality_json STATIC
+    src/meshing/MeshQualityJson.cpp
+    src/meshing/MeshQualityJson.h)
+target_include_directories(cceda_mesh_quality_json
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_mesh_quality_json
+    PUBLIC Qt6::Core cceda_mesh_quality)
 
 add_library(cceda_meshing_protocol STATIC
     src/meshing/GeometryMap.cpp
@@ -69,14 +96,28 @@ target_link_libraries(cceda_meshing_worker_client
     PRIVATE cceda_meshing_protocol)
 
 add_library(cceda_application STATIC
+    src/application/IMeshExporter.h
+    src/application/IStagedFilePublisher.h
+    src/application/MeshExportJobController.cpp
+    src/application/MeshExportJobController.h
+    src/application/MeshExportTransaction.cpp
+    src/application/MeshExportTransaction.h
     src/application/MeshingJobController.cpp
     src/application/MeshingJobController.h
     src/application/WorkerMeshArtifactValidator.cpp
     src/application/WorkerMeshArtifactValidator.h)
 target_include_directories(cceda_application PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_application
-    PUBLIC Qt6::Core cceda_domain cceda_mesh_codec
-    PRIVATE Qt6::Concurrent cceda_meshing_worker_client cceda_meshing_protocol)
+    PUBLIC Qt6::Core cceda_domain cceda_mesh_codec cceda_mesh_quality
+    PRIVATE Qt6::Concurrent cceda_meshing_worker_client
+        cceda_meshing_protocol cceda_mesh_quality_json)
+
+add_library(cceda_platform_windows STATIC
+    src/platform/WindowsStagedFilePublisher.cpp
+    src/platform/WindowsStagedFilePublisher.h)
+target_include_directories(cceda_platform_windows
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_platform_windows PUBLIC cceda_application)
 
 add_library(cceda_geometry_occ STATIC
     src/geometry/OccGeometryRepository.cpp
@@ -89,6 +130,8 @@ target_link_libraries(cceda_geometry_occ
 set_property(TARGET cceda_geometry_occ PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(cceda_visualization_occ STATIC
+    src/visualization/OccMeshTriangulation.cpp
+    src/visualization/OccMeshTriangulation.h
     src/visualization/OccViewportController.cpp)
 target_include_directories(cceda_visualization_occ PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_visualization_occ
@@ -101,22 +144,45 @@ target_link_libraries(cceda_gmsh_worker PRIVATE
     Qt6::Core
     cceda_mesh_codec
     cceda_mesh_gmsh
+    cceda_mesh_quality_json
     cceda_meshing_protocol)
+if(WIN32)
+    target_link_libraries(cceda_gmsh_worker PRIVATE Psapi)
+endif()
 set_target_properties(cceda_gmsh_worker PROPERTIES
     WIN32_EXECUTABLE FALSE
     DISABLE_PRECOMPILE_HEADERS ON)
 
+add_library(cceda_ui_widgets STATIC
+    src/ui/MeshingTaskPanel.cpp
+    src/ui/MeshingTaskPanelPresentation.cpp
+    src/ui/MeshingTaskPanel.h
+    src/ui/QualityInspectionPanel.cpp
+    src/ui/QualityInspectionPanelPresentation.cpp
+    src/ui/QualityInspectionPanel.h)
+target_include_directories(cceda_ui_widgets
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(cceda_ui_widgets
+    PUBLIC Qt6::Widgets cceda_application)
+set_property(TARGET cceda_ui_widgets
+    PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+
 qt_add_executable(CCEDA
     src/ui/main.cpp
     src/ui/MainWindow.cpp
+    src/ui/MainWindowMeshExport.cpp
+    src/ui/MainWindowMeshing.cpp
     src/ui/MainWindow.h
     src/ui/OccViewportWidget.cpp
     src/ui/OccViewportWidget.h)
 target_link_libraries(CCEDA PRIVATE
     Qt6::Widgets
     Qt6::Concurrent
+    cceda_ui_widgets
     cceda_domain
     cceda_geometry_occ
+    cceda_mesh_export_gmsh
+    cceda_platform_windows
     cceda_visualization_occ)
 target_compile_definitions(CCEDA PRIVATE
     UNICODE
@@ -125,7 +191,9 @@ target_compile_definitions(CCEDA PRIVATE
     NOMINMAX
     WINVER=0x0A00
     _WIN32_WINNT=0x0A00
-    CCEDA_OCC_RESOURCE_DIR=L\"${OpenCASCADE_RESOURCE_DIR}\")
+    CCEDA_OCC_RESOURCE_DIR=L\"${OpenCASCADE_RESOURCE_DIR}\"
+    CCEDA_GMSH_EXECUTABLE_PATH=L\"${CCEDA_GMSH_EXECUTABLE}\")
+add_dependencies(CCEDA cceda_gmsh_worker)
 set_target_properties(CCEDA PROPERTIES
     WIN32_EXECUTABLE TRUE
     DISABLE_PRECOMPILE_HEADERS ON
@@ -133,7 +201,7 @@ set_target_properties(CCEDA PROPERTIES
     VS_DEBUGGER_ENVIRONMENT "PATH=${OpenCASCADE_BINARY_DIR};${CCEDA_QT_ROOT}/bin;%PATH%")
 
 if(MSVC)
-    foreach(target cceda_domain cceda_mesh_gmsh cceda_mesh_codec cceda_meshing_protocol cceda_meshing_worker_client cceda_application cceda_geometry_occ cceda_visualization_occ cceda_gmsh_worker CCEDA)
+    foreach(target cceda_domain cceda_mesh_quality cceda_mesh_quality_json cceda_mesh_gmsh cceda_mesh_export_gmsh cceda_mesh_codec cceda_meshing_protocol cceda_meshing_worker_client cceda_application cceda_platform_windows cceda_geometry_occ cceda_visualization_occ cceda_ui_widgets cceda_gmsh_worker CCEDA)
         target_compile_options(${target} PRIVATE /utf-8 /W4)
     endforeach()
 endif()
@@ -162,26 +230,89 @@ add_custom_command(TARGET CCEDA POST_BUILD
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT CCEDA)
 set_target_properties(
     cceda_domain
+    cceda_mesh_quality
     cceda_mesh_gmsh
+    cceda_mesh_export_gmsh
+    cceda_mesh_quality_json
     cceda_mesh_codec
     cceda_meshing_protocol
     cceda_meshing_worker_client
     cceda_application
+    cceda_platform_windows
     cceda_geometry_occ
     cceda_visualization_occ
+    cceda_ui_widgets
     PROPERTIES
     FOLDER "Libraries")
 
 if(BUILD_TESTING)
+    add_executable(cceda_occ_mesh_triangulation_tests
+        tests/OccMeshTriangulationTests.cpp)
+    target_link_libraries(cceda_occ_mesh_triangulation_tests PRIVATE
+        cceda_visualization_occ)
+    set_property(TARGET cceda_occ_mesh_triangulation_tests
+        PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+    add_test(
+        NAME visualization.occ_mesh_triangulation
+        COMMAND cceda_occ_mesh_triangulation_tests)
+
+    add_executable(cceda_viewport_widget_tests
+        tests/OccViewportWidgetTests.cpp
+        src/ui/OccViewportWidget.cpp
+        src/ui/OccViewportWidget.h)
+    target_include_directories(cceda_viewport_widget_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(cceda_viewport_widget_tests PRIVATE
+        Qt6::Widgets)
+    add_test(
+        NAME ui.viewport_widget
+        COMMAND cceda_viewport_widget_tests)
+    set_tests_properties(ui.viewport_widget PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CCEDA_QT_ROOT}/plugins"
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
+    add_executable(cceda_meshing_task_panel_tests
+        tests/MeshingTaskPanelTests.cpp)
+    target_include_directories(cceda_meshing_task_panel_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(cceda_meshing_task_panel_tests PRIVATE
+        Qt6::Widgets
+        cceda_ui_widgets)
+    add_test(
+        NAME ui.meshing_task_panel
+        COMMAND cceda_meshing_task_panel_tests)
+    set_tests_properties(ui.meshing_task_panel PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CCEDA_QT_ROOT}/plugins"
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
+    add_executable(cceda_quality_inspection_panel_tests
+        tests/QualityInspectionPanelTests.cpp)
+    target_include_directories(cceda_quality_inspection_panel_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(cceda_quality_inspection_panel_tests PRIVATE
+        Qt6::Widgets
+        cceda_ui_widgets)
+    add_test(
+        NAME ui.quality_inspection_panel
+        COMMAND cceda_quality_inspection_panel_tests)
+    set_tests_properties(ui.quality_inspection_panel PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CCEDA_QT_ROOT}/plugins"
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
     add_executable(cceda_meshing_worker_tests
         tests/MeshingWorkerTests.cpp)
     target_link_libraries(cceda_meshing_worker_tests PRIVATE
         Qt6::Core
         cceda_mesh_codec
         cceda_meshing_worker_client
+        cceda_mesh_quality_json
         cceda_geometry_occ
         TKTopAlgo
-        TKBRep)
+        TKBRep
+        TKPrim)
     set_property(TARGET cceda_meshing_worker_tests
         PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
     add_dependencies(cceda_meshing_worker_tests cceda_gmsh_worker)
@@ -203,6 +334,63 @@ if(BUILD_TESTING)
     add_executable(cceda_mesh_model_tests tests/MeshModelTests.cpp)
     target_link_libraries(cceda_mesh_model_tests PRIVATE cceda_domain)
     add_test(NAME domain.mesh_model COMMAND cceda_mesh_model_tests)
+
+    add_executable(cceda_mesh_export_settings_tests
+        tests/MeshExportSettingsTests.cpp)
+    target_link_libraries(cceda_mesh_export_settings_tests PRIVATE cceda_domain)
+    add_test(NAME domain.mesh_export_settings
+        COMMAND cceda_mesh_export_settings_tests)
+
+    add_executable(cceda_mesh_exporter_contract_tests
+        tests/MeshExporterContractTests.cpp)
+    target_link_libraries(cceda_mesh_exporter_contract_tests PRIVATE
+        cceda_application)
+    add_test(NAME application.mesh_exporter_contract
+        COMMAND cceda_mesh_exporter_contract_tests)
+
+    add_executable(cceda_mesh_export_transaction_tests
+        tests/MeshExportTransactionTests.cpp)
+    target_link_libraries(cceda_mesh_export_transaction_tests PRIVATE
+        cceda_application
+        cceda_platform_windows)
+    add_test(NAME application.mesh_export_transaction
+        COMMAND cceda_mesh_export_transaction_tests)
+
+    add_executable(cceda_mesh_export_job_controller_tests
+        tests/MeshExportJobControllerTests.cpp)
+    target_link_libraries(cceda_mesh_export_job_controller_tests PRIVATE
+        Qt6::Core
+        cceda_application
+        cceda_platform_windows)
+    add_test(NAME application.mesh_export_job_controller
+        COMMAND cceda_mesh_export_job_controller_tests)
+
+    add_executable(cceda_gmsh_msh41_mesh_exporter_tests
+        tests/GmshMsh41MeshExporterTests.cpp)
+    target_link_libraries(cceda_gmsh_msh41_mesh_exporter_tests PRIVATE
+        Qt6::Core
+        cceda_mesh_export_gmsh
+        cceda_mesh_gmsh)
+    add_test(NAME meshing.gmsh_msh41_mesh_exporter
+        COMMAND cceda_gmsh_msh41_mesh_exporter_tests
+                ${CCEDA_GMSH_EXECUTABLE})
+    set_tests_properties(meshing.gmsh_msh41_mesh_exporter PROPERTIES
+        TIMEOUT 30
+        LABELS "integration;meshing")
+
+    add_executable(cceda_mesh_quality_tests
+        tests/MeshQualityTests.cpp)
+    target_link_libraries(cceda_mesh_quality_tests PRIVATE
+        cceda_mesh_quality)
+    add_test(NAME mesh.quality COMMAND cceda_mesh_quality_tests)
+
+    add_executable(cceda_mesh_quality_json_tests
+        tests/MeshQualityJsonTests.cpp)
+    target_link_libraries(cceda_mesh_quality_json_tests PRIVATE
+        Qt6::Core
+        cceda_mesh_quality_json)
+    add_test(NAME meshing.mesh_quality_json
+        COMMAND cceda_mesh_quality_json_tests)
 
     add_executable(cceda_mesh_binary_codec_tests
         tests/MeshBinaryCodecTests.cpp)
@@ -269,7 +457,8 @@ if(BUILD_TESTING)
         cceda_application
         cceda_geometry_occ
         TKTopAlgo
-        TKBRep)
+        TKBRep
+        TKPrim)
     set_property(TARGET cceda_meshing_job_controller_tests
         PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
     add_dependencies(cceda_meshing_job_controller_tests cceda_gmsh_worker)
@@ -316,8 +505,14 @@ if(BUILD_TESTING)
     set_target_properties(
         cceda_domain_tests
         cceda_mesh_model_tests
+        cceda_mesh_quality_tests
         cceda_mesh_binary_codec_tests
+        cceda_mesh_quality_json_tests
+        cceda_viewport_widget_tests
         cceda_gmsh_msh41_reader_tests
+        cceda_gmsh_msh41_mesh_exporter_tests
+        cceda_mesh_export_job_controller_tests
+        cceda_mesh_export_transaction_tests
         cceda_geometry_map_tests
         cceda_geometry_import_tests
         cceda_geometry_snapshot_tests

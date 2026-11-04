@@ -1,6 +1,8 @@
 #pragma once
 
 #include "domain/Revisions.h"
+#include "domain/MeshGenerationSettings.h"
+#include "domain/MeshingResourceLimits.h"
 
 #include <QObject>
 #include <QString>
@@ -19,12 +21,15 @@ struct GmshWorkerLaunchRequest
   QString jobId;
   domain::GeometryRevision sourceGeometryRevision = 0;
   QString mainBuildId;
+  domain::MeshingResourceLimits resourceLimits;
 };
 
 struct GmshWorkerProgress
 {
   QString stage;
   std::optional<int> percent;
+  std::uint64_t elapsedMilliseconds = 0;
+  std::uint64_t workingSetBytes = 0;
 };
 
 struct GmshWorkerResult
@@ -34,9 +39,14 @@ struct GmshWorkerResult
   QString meshSha256;
   QString meshBinarySha256;
   QString geometryMapResultSha256;
+  QString qualitySha256;
   std::uint64_t nodeCount = 0;
   std::uint64_t triangleCount = 0;
   std::uint64_t tetrahedronCount = 0;
+  std::uint64_t elapsedMilliseconds = 0;
+  std::uint64_t peakWorkingSetBytes = 0;
+  domain::MeshGenerationSettings effectiveSettings;
+  domain::MeshingResourceLimits effectiveResourceLimits;
 };
 
 struct GmshWorkerCancellation
@@ -52,6 +62,7 @@ enum class GmshWorkerFailureKind
   InvalidRequest,
   ProtocolError,
   WorkerReportedError,
+  ResourceLimitExceeded,
   WorkerLost,
 };
 

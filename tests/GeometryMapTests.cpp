@@ -6,6 +6,7 @@
 #include <QJsonObject>
 
 #include <iostream>
+#include <limits>
 
 namespace
 {
@@ -30,13 +31,18 @@ QJsonArray identityMatrix()
   };
 }
 
+QJsonArray validBounds()
+{
+  return QJsonArray{-1.0, -2.0, -3.0, 4.0, 5.0, 6.0};
+}
+
 QJsonObject validMap()
 {
   return {
     {"schema", QJsonObject{
       {"name", "cceda.geometry-map"},
       {"major", 0},
-      {"minor", 1},
+      {"minor", 2},
     }},
     {"sourceGeometryRevision", 42},
     {"mode", "independent-solids"},
@@ -50,6 +56,7 @@ QJsonObject validMap()
         {"sourcePartGeometryId", "part/1"},
         {"sourceSolidGeometryId", "solid/1"},
         {"sourceFaceGeometryIds", QJsonArray{"face/shared", "face/1"}},
+        {"brepBoundsMm", validBounds()},
         {"brepLocation", QJsonObject{
           {"transformsBaked", false},
           {"matrixRowMajor", identityMatrix()},
@@ -62,6 +69,7 @@ QJsonObject validMap()
         {"sourcePartGeometryId", "part/2"},
         {"sourceSolidGeometryId", "solid/2"},
         {"sourceFaceGeometryIds", QJsonArray{"face/shared", "face/2"}},
+        {"brepBoundsMm", QJsonArray{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}},
         {"brepLocation", QJsonObject{
           {"transformsBaked", false},
           {"matrixRowMajor", identityMatrix()},
@@ -111,7 +119,7 @@ int main()
   using namespace cceda::meshing;
 
   const GeometryMapReadResult valid = read(validMap());
-  expect(valid.succeeded(), "a protocol-0.1 independent geometry map is accepted");
+  expect(valid.succeeded(), "a protocol-0.2 independent geometry map is accepted");
   expect(valid.map.has_value(), "a valid map returns typed data");
   if (valid.map)
   {
@@ -120,8 +128,10 @@ int main()
     expect(valid.map->regions.size() == 2,
       "all independent regions are retained");
     expect(valid.map->regions.at(0).regionId == 1
-        && valid.map->regions.at(0).solidGeometryId == "solid/1",
-      "stable region and Solid identities are retained");
+        && valid.map->regions.at(0).solidGeometryId == "solid/1"
+        && valid.map->regions.at(0).brepBoundsMm
+          == std::array<double, 6>{-1.0, -2.0, -3.0, 4.0, 5.0, 6.0},
+      "stable region identity and geometry signature are retained");
     expect(valid.map->sharedFaceCandidates.size() == 1,
       "validated shared-Face candidates are retained");
   }
@@ -139,6 +149,36 @@ int main()
   duplicateRegion.insert("regions", duplicateRegions);
   expect(read(duplicateRegion).error == GeometryMapReadErrorCode::InvalidRegion,
     "duplicate stable region IDs are rejected");
+
+  QJsonObject missingBounds = validMap();
+  QJsonArray missingBoundsRegions = missingBounds.value("regions").toArray();
+  QJsonObject missingBoundsRegion = missingBoundsRegions.at(0).toObject();
+  missingBoundsRegion.remove("brepBoundsMm");
+  missingBoundsRegions.replace(0, missingBoundsRegion);
+  missingBounds.insert("regions", missingBoundsRegions);
+  expect(read(missingBounds).error == GeometryMapReadErrorCode::InvalidRegion,
+    "every region must provide its BREP bounds signature");
+
+  QJsonObject nonFiniteBounds = validMap();
+  QJsonArray nonFiniteBoundsRegions = nonFiniteBounds.value("regions").toArray();
+  QJsonObject nonFiniteBoundsRegion = nonFiniteBoundsRegions.at(0).toObject();
+  nonFiniteBoundsRegion.insert("brepBoundsMm",
+    QJsonArray{0.0, 0.0, 0.0,
+      std::numeric_limits<double>::infinity(), 1.0, 1.0});
+  nonFiniteBoundsRegions.replace(0, nonFiniteBoundsRegion);
+  nonFiniteBounds.insert("regions", nonFiniteBoundsRegions);
+  expect(read(nonFiniteBounds).error == GeometryMapReadErrorCode::InvalidRegion,
+    "region BREP bounds must be finite");
+
+  QJsonObject reversedBounds = validMap();
+  QJsonArray reversedBoundsRegions = reversedBounds.value("regions").toArray();
+  QJsonObject reversedBoundsRegion = reversedBoundsRegions.at(0).toObject();
+  reversedBoundsRegion.insert(
+    "brepBoundsMm", QJsonArray{2.0, -2.0, -3.0, 1.0, 5.0, 6.0});
+  reversedBoundsRegions.replace(0, reversedBoundsRegion);
+  reversedBounds.insert("regions", reversedBoundsRegions);
+  expect(read(reversedBounds).error == GeometryMapReadErrorCode::InvalidRegion,
+    "region BREP bounds must be ordered on every axis");
 
   QJsonObject danglingSharedFace = validMap();
   QJsonArray sharedFaces = danglingSharedFace.value("sharedFaceCandidates").toArray();

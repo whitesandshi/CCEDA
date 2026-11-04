@@ -134,6 +134,36 @@ std::optional<std::array<double, 16>> matrix(const QJsonValue& value)
   return result;
 }
 
+std::optional<std::array<double, 6>> bounds(const QJsonValue& value)
+{
+  if (!value.isArray() || value.toArray().size() != 6)
+  {
+    return std::nullopt;
+  }
+  std::array<double, 6> result{};
+  const QJsonArray values = value.toArray();
+  for (qsizetype index = 0; index < values.size(); ++index)
+  {
+    if (!values.at(index).isDouble())
+    {
+      return std::nullopt;
+    }
+    const double component = values.at(index).toDouble();
+    if (!std::isfinite(component))
+    {
+      return std::nullopt;
+    }
+    result[static_cast<std::size_t>(index)] = component;
+  }
+  if (result[0] > result[3]
+      || result[1] > result[4]
+      || result[2] > result[5])
+  {
+    return std::nullopt;
+  }
+  return result;
+}
+
 std::optional<QByteArray> readBounded(
   QIODevice& input,
   std::uint64_t maximumBytes,
@@ -256,7 +286,7 @@ GeometryMapReadResult readGeometryMap(
     if (!value.isObject() || !hasOnlyKeys(region, {
         "regionId", "brepSolidIndex", "sourceAssemblyGeometryIds",
         "sourcePartGeometryId", "sourceSolidGeometryId",
-        "sourceFaceGeometryIds", "brepLocation"}))
+        "sourceFaceGeometryIds", "brepLocation", "brepBoundsMm"}))
     {
       return fail(GeometryMapReadErrorCode::InvalidRegion,
         "geometry-map region fields are invalid");
@@ -273,6 +303,7 @@ GeometryMapReadResult readGeometryMap(
       limits.maximumFaceReferences);
     const QJsonObject location = region.value("brepLocation").toObject();
     const auto locationMatrix = matrix(location.value("matrixRowMajor"));
+    const auto brepBounds = bounds(region.value("brepBoundsMm"));
     if (!regionId || !solidIndex || !assemblies || !faces
         || !validIdentity(region.value("sourcePartGeometryId"),
           limits.maximumIdentityCharacters)
@@ -283,13 +314,14 @@ GeometryMapReadResult readGeometryMap(
         || !location.value("transformsBaked").isBool()
         || location.value("transformsBaked").toBool() != result.transformsBaked
         || !locationMatrix
+        || !brepBounds
         || !insertUnique(regionIds, *regionId)
         || !insertUnique(brepSolidIndices, *solidIndex)
         || !insertUnique(solidGeometryIds,
           region.value("sourceSolidGeometryId").toString()))
     {
       return fail(GeometryMapReadErrorCode::InvalidRegion,
-        "geometry-map region identities, transform, or uniqueness are invalid");
+        "geometry-map region identity, transform, bounds, or uniqueness is invalid");
     }
     if (faces->isEmpty())
     {
@@ -312,6 +344,7 @@ GeometryMapReadResult readGeometryMap(
       region.value("sourceSolidGeometryId").toString(),
       *faces,
       *locationMatrix,
+      *brepBounds,
     });
   }
 

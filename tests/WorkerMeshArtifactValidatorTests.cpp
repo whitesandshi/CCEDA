@@ -40,6 +40,24 @@ cceda::domain::MeshModel makeWorkerMesh()
   return mesh;
 }
 
+cceda::domain::MeshModel makeMultiRegionWorkerMesh()
+{
+  using namespace cceda::domain;
+  MeshModel mesh = makeWorkerMesh();
+  mesh.nodes.insert(mesh.nodes.end(), {
+    {5, 2.0, 0.0, 0.0, "solid-8"},
+    {6, 3.0, 0.0, 0.0, "solid-8"},
+    {7, 2.0, 1.0, 0.0, "solid-8"},
+    {8, 2.0, 0.0, 1.0, {}},
+  });
+  mesh.elements.insert(mesh.elements.end(), {
+    {21, MeshElementType::Triangle3, {5, 6, 7, 0}, 4, "solid-8"},
+    {22, MeshElementType::Tetrahedron4, {5, 6, 7, 8}, 4, "solid-8"},
+  });
+  mesh.regions.push_back({4, {"solid-8"}});
+  return mesh;
+}
+
 cceda::application::WorkerMeshArtifactExpectation expectation()
 {
   return {
@@ -49,8 +67,20 @@ cceda::application::WorkerMeshArtifactExpectation expectation()
     4,
     1,
     1,
-    3,
-    "solid-7",
+    {{3, "solid-7"}},
+  };
+}
+
+cceda::application::WorkerMeshArtifactExpectation multiRegionExpectation()
+{
+  return {
+    7,
+    "gmsh",
+    "4.15.2",
+    8,
+    2,
+    2,
+    {{3, "solid-7"}, {4, "solid-8"}},
   };
 }
 }
@@ -67,6 +97,37 @@ int main()
   expect(valid.succeeded(), "valid Worker mesh artifact should pass policy validation");
   expect(valid.mesh && valid.mesh->meshRevision == 0,
     "validated artifact should retain Worker mesh revision zero");
+
+  const auto multiRegionEncoded = meshing::writeMeshBinary(
+    makeMultiRegionWorkerMesh(), domain::MeshValidationMode::WorkerArtifact);
+  expect(multiRegionEncoded.succeeded(),
+    "test multi-region Worker mesh should encode");
+  expect(application::validateWorkerMeshArtifact(
+      multiRegionEncoded.bytes, multiRegionExpectation(), {}).succeeded(),
+    "a complete independent-Solid region mapping should pass validation");
+
+  auto missingRegion = multiRegionExpectation();
+  missingRegion.regions.pop_back();
+  expect(!application::validateWorkerMeshArtifact(
+      multiRegionEncoded.bytes, missingRegion, {}).succeeded(),
+    "every neutral mesh region must have a submitted mapping expectation");
+
+  auto duplicateRegion = multiRegionExpectation();
+  duplicateRegion.regions.back().regionId = duplicateRegion.regions.front().regionId;
+  expect(application::validateWorkerMeshArtifact(
+      multiRegionEncoded.bytes, duplicateRegion, {}).code
+      == application::WorkerMeshArtifactValidationCode::InvalidExpectation,
+    "duplicate expected region IDs must be rejected at the policy boundary");
+
+  auto crossedRegionAssociation = makeMultiRegionWorkerMesh();
+  crossedRegionAssociation.elements.front().geometryId = "solid-8";
+  const auto crossedRegionBytes = meshing::writeMeshBinary(
+    crossedRegionAssociation, domain::MeshValidationMode::WorkerArtifact);
+  expect(crossedRegionBytes.succeeded(),
+    "crossed-region association fixture should encode");
+  expect(!application::validateWorkerMeshArtifact(
+      crossedRegionBytes.bytes, multiRegionExpectation(), {}).succeeded(),
+    "each element must reference the Solid assigned to its own region");
 
   auto corrupt = encoded.bytes;
   corrupt.back() ^= 0x01U;

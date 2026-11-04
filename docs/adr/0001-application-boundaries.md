@@ -25,21 +25,79 @@ The UI can evolve without owning OCCT topology objects, and a failing mesher can
 
 The first Worker slice uses the explicitly documented executable-based adapter because the local Gmsh build has no linkable SDK. It establishes process isolation, protocol-major rejection, bounded request validation, real STEP meshing, and experimental intermediate-result verification.
 
-The adapter does not make Gmsh `.msh` a domain format. The bounded MSH reader converts validated output to the neutral mesh contract when the caller supplies stable typed associations. The current single-region Worker derives those associations from actual retained MSH entity blocks and the snapshot Solid mapping, then atomically writes the versioned neutral mesh artifact. Proven multi-region/Face reconciliation, quality evaluation, and resource enforcement remain required before the main application can commit a real Worker result.
+The adapter does not make Gmsh `.msh` a domain format. The bounded MSH reader converts validated output to the neutral mesh contract when the caller supplies stable typed associations. The Worker derives independent-Solid region associations from actual retained MSH entity blocks and the sealed snapshot mapping, then atomically writes the versioned neutral mesh artifact. The main process independently validates the complete region/Solid set, recomputes the bounded quality result, and commits only a valid mesh for the exact current geometry revision. Stable Face reconciliation and explicit conformal topology preparation remain later contracts.
 
 The neutral `MeshModel` and its structural validator live in the dependency-free domain layer. Binary alignment, compression, block checksums, and result-map serialization remain deliberately unfrozen and are not encoded by the domain model.
 
 The project aggregate owns at most one current neutral mesh. It accepts only a structurally valid uncommitted Worker artifact for the exact current `GeometryRevision`, assigns the next positive `MeshRevision`, and replaces the previous mesh only after every check succeeds. Geometry changes retain that mesh for inspection but mark it stale and non-exportable.
 
-ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader treats Worker output as untrusted, requires caller-provided byte/count limits, validates the complete low-order Gmsh topology, and removes Gmsh entity tags while applying typed stable entity/region mappings. The executable Worker can prove a coarse Solid association for one snapshot region; it must continue to fail closed until richer map data can prove multi-region and Face reconciliation.
+Export preparation captures a shared read-only mesh together with its exact
+geometry and mesh revisions only while that mesh is current and `Ready`.
+Keeping the shared object alive does not preserve its authority as the current
+result: before an exporter atomically publishes a file, the project aggregate
+must recheck the shared-object identity and both revisions. This supports
+background writing without allowing geometry changes or successful remeshing
+to publish an obsolete mesh.
+
+Export settings are dependency-free typed values with no implicit format or
+encoding defaults. The domain validates only completeness, enum integrity, and
+a bounded canonical region-policy identifier. A concrete exporter must map
+that identifier and the requested version through its own capability whitelist;
+the value is never executable text or a backend command fragment.
+
+`IMeshExporter` is an application-layer staged-writer port over the committed
+neutral mesh. Its standard-library-only contract accepts explicit settings and
+an application-generated absolute, lexically normalized staging path, and it
+returns a typed result with explicit staging-file ownership without publishing
+the user-selected final path. Final same-directory replacement is an
+application responsibility after the project aggregate rechecks the captured
+mesh identity and both revisions.
+This separation prevents a long-running writer from publishing a mesh that
+became stale or was replaced while staging was in progress.
+
+The concrete publication flow represents begin, staged, and published states
+with move-only capabilities. Begin and publish are restricted to the
+`ProjectState` owner thread, while only the sealed writer transaction may move
+to a background thread. This serializes the revision recheck and synchronous
+publication against valid project mutations. Publishers must not re-enter
+project mutation, and non-success must preserve both paths.
+
+`ProjectState` itself is non-copyable so a staged capability cannot be checked
+against a duplicated aggregate that retained an earlier revision tuple.
+
+The Windows publisher uses `MoveFileExW` with replace-existing and write-through
+flags on paths in the exact same directory, never enabling the cross-volume
+copy fallback. It rejects case-insensitive aliases, directory endpoints, and
+reparse-point endpoints. Random UUID
+stage names and exclusive writer creation prevent normal collisions; deliberate
+same-user namespace substitution remains outside the current pathname-based
+port's threat model and would require a future handle-bearing contract.
+
+The first concrete exporter is a QtCore file adapter for explicit MSH 4.1 ASCII
+requests using the `physical-groups` policy. It writes official MSH 4.1 entity,
+node, and element blocks directly from `MeshModel`; Triangle3 and Tetrahedron4
+become Gmsh element types 2 and 4. Geometry associations define deterministic
+entity blocks, while representable stable region IDs define Physical Group
+tags. `QFile::NewOnly` prevents staging-path overwrite at the operating-system
+boundary. Binary output, other versions, and other policies remain unsupported
+rather than being silently substituted.
+
+The Qt workbench composes the exporter and publisher through an
+application-layer `MeshExportJobController`. It captures the transaction and
+publishes the staged result on the `ProjectState` owner thread, while only the
+streaming writer runs through `QtConcurrent`. UI code receives typed outcomes,
+maps them to stable user-facing messages, and keeps adapter diagnostics in the
+bounded application log.
+
+ASCII MSH 4.1 parsing belongs to the Gmsh adapter, not the domain. The reader treats Worker output as untrusted, requires caller-provided byte/count limits, validates the complete low-order Gmsh topology, and removes Gmsh entity tags while applying typed stable entity/region mappings. The executable Worker proves independent-Solid multi-region associations from bounded unique MSH volume AABB matches and volume-boundary Surface ownership. Stable source Face reconciliation remains a later contract.
 
 The OCCT importer treats XCAF leaves as Parts and indexes their unique Solid, Face, Edge, and Vertex topology with opaque IDs scoped to one `GeometryRevision`. The OCCT repository retains the reverse ID-to-shape association and rejects lookups for a different revision; `TopoDS_Shape` remains inside the geometry adapter. These IDs do not imply any relation to Gmsh entity tags.
 
-`IGeometrySnapshotService` defines the standard-library-only port for protocol-0.1 independent-Solid snapshots. Its OCCT adapter captures the domain document and topology map under one repository lock, includes every valid meshable Solid exactly once in an OCCT BREP compound, excludes non-solid Parts and invalid Solids, and never mutates canonical XCAF geometry. `geometry-map.json` assigns deterministic positive region and BREP Solid indexes; retains source Assembly, Part, Solid, and Face IDs; records shared-Face candidates; and carries a row-major location matrix for each region. Locations are preserved in BREP and therefore declared `transformsBaked: false`, rather than being misrepresented as physically baked geometry.
+`IGeometrySnapshotService` defines the standard-library-only port for protocol-0.2 independent-Solid snapshots. Its OCCT adapter captures the domain document and topology map under one repository lock, includes every valid meshable Solid exactly once in an OCCT BREP compound, excludes non-solid Parts and invalid Solids, and never mutates canonical XCAF geometry. `geometry-map.json` assigns deterministic positive region and BREP Solid indexes; retains source Assembly, Part, Solid, and Face IDs; records shared-Face candidates; and carries a row-major location matrix plus finite canonical-millimeter BREP bounds for each region. Locations are preserved in BREP and therefore declared `transformsBaked: false`, rather than being misrepresented as physically baked geometry.
 
-Snapshot publication accepts only an absolute absent-or-empty output directory and a caller byte budget. BREP is written without triangulation to a same-directory temporary file, hashed by streaming SHA-256, and renamed only after the versioned JSON map fits the remaining budget. The JSON map is atomically committed last; scoped cleanup removes the BREP on every failure path. Both final byte digests are returned to the caller for later `request.json` sealing. The 0.1 input-map schema does not claim that the executable Gmsh adapter can yet recover stable source IDs from imported Gmsh tags.
+Snapshot publication accepts only an absolute absent-or-empty output directory and a caller byte budget. BREP is written without triangulation to a same-directory temporary file, hashed by streaming SHA-256, and renamed only after the versioned JSON map fits the remaining budget. The JSON map is atomically committed last; scoped cleanup removes the BREP on every failure path. Both final byte digests are returned to the caller for later `request.json` sealing. The 0.2 input map uses located-Solid AABBs because MSH 4.1 exposes the same coordinate order for volume entities; import order and Gmsh tag order remain explicitly non-authoritative. Multi-region reconciliation requires an exact one-to-one region/meshed-volume match within the frozen `1e-6 mm` coordinate tolerance and complete unique Surface ownership.
 
-The main-side Worker client is a separate QtCore adapter. It owns `QProcess`, treats standard output as untrusted bounded NDJSON, performs the versioned handshake, checks job and source-revision identity, and emits only neutral progress/result/failure DTOs. A result is published only after both a valid result message and normal process exit; process failures never mutate project state.
+The main-side Worker client is a separate QtCore adapter. It owns `QProcess`, treats standard output as untrusted bounded NDJSON, performs the versioned handshake, checks job and source-revision identity, and emits only neutral progress/result/failure DTOs. A result is published only after both a valid result message and normal process exit; process failures never mutate project state. On Windows, a kill-on-close Job Object contains the Worker process tree for forced cancellation and wall-clock enforcement. Working-set enforcement remains a sampled Worker policy because Job Object memory limits measure committed memory rather than the specified combined working set.
 
 The current executable adapter has a matching main-side workspace builder. It accepts only an absent or empty absolute workspace, copies a bounded STEP snapshot while computing SHA-256, fixes all relative input/output paths, and atomically publishes `request.json` last. This protocol-0.1 helper is intentionally named for the executable adapter and does not freeze the final BREP, geometry-map, or meshbin formats.
 
@@ -54,7 +112,11 @@ Cancellation is an explicit application and protocol state rather than a generic
 - Qt model/view architecture: https://doc.qt.io/qt-6/model-view-programming.html
 - Qt process lifecycle and channels: https://doc.qt.io/qt-6.8/qprocess.html
 - Qt single-shot cancellation deadlines: https://doc.qt.io/qt-6.8/qtimer.html
+- Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+- Windows extended Job Object limits: https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information
 - Qt atomic file replacement: https://doc.qt.io/qt-6.8/qsavefile.html
+- Qt UUID generation: https://doc.qt.io/qt-6.8/quuid.html
+- Windows same-volume file replacement: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw
 - Qt cryptographic hashes: https://doc.qt.io/qt-6.8/qcryptographichash.html
 - Qt concurrent function execution: https://doc.qt.io/qt-6.8/qtconcurrentrun.html
 - Qt future completion monitoring: https://doc.qt.io/qt-6.8/qfuturewatcher.html

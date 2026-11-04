@@ -2,6 +2,8 @@
 
 #include "geometry/OccGeometryRepository.h"
 
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepTools.hxx>
 #include <NCollection_DataMap.hxx>
@@ -21,6 +23,7 @@
 #include <TopoDS_Compound.hxx>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -152,6 +155,16 @@ QJsonArray matrixJson(const std::array<double, 16>& values)
   return result;
 }
 
+QJsonArray boundsJson(const std::array<double, 6>& values)
+{
+  QJsonArray result;
+  for (const double value : values)
+  {
+    result.append(value);
+  }
+  return result;
+}
+
 std::vector<std::string> assemblyAncestors(
   const std::string& partId,
   const std::unordered_map<std::string, const domain::GeometryEntity*>& entities)
@@ -186,6 +199,7 @@ QByteArray geometryMapJson(const geometry::GeometrySnapshot& snapshot)
       {"sourcePartGeometryId", QString::fromUtf8(region.partGeometryId)},
       {"sourceSolidGeometryId", QString::fromUtf8(region.solidGeometryId)},
       {"sourceFaceGeometryIds", stringsJson(region.faceGeometryIds)},
+      {"brepBoundsMm", boundsJson(region.brepBoundsMm)},
       {"brepLocation", QJsonObject{
         {"transformsBaked", snapshot.transformsBaked},
         {"matrixRowMajor", matrixJson(region.brepLocation)},
@@ -348,6 +362,26 @@ GeometrySnapshotResult OccGeometrySnapshotService::createSnapshot(
       region.partGeometryId = entity.parentId;
       region.solidGeometryId = entity.id;
       region.brepLocation = locationMatrix(shape->second);
+      Bnd_Box solidBounds;
+      BRepBndLib::AddOptimal(shape->second, solidBounds, false, false);
+      if (solidBounds.IsVoid() || solidBounds.IsOpen())
+      {
+        return fail(GeometrySnapshotErrorCode::RepositoryInconsistent,
+          "A meshable Solid does not have finite BREP bounds");
+      }
+      solidBounds.Get(
+        region.brepBoundsMm[0], region.brepBoundsMm[1],
+        region.brepBoundsMm[2], region.brepBoundsMm[3],
+        region.brepBoundsMm[4], region.brepBoundsMm[5]);
+      if (!std::all_of(region.brepBoundsMm.begin(), region.brepBoundsMm.end(),
+            [](double value) { return std::isfinite(value); })
+          || region.brepBoundsMm[0] > region.brepBoundsMm[3]
+          || region.brepBoundsMm[1] > region.brepBoundsMm[4]
+          || region.brepBoundsMm[2] > region.brepBoundsMm[5])
+      {
+        return fail(GeometrySnapshotErrorCode::RepositoryInconsistent,
+          "A meshable Solid has invalid BREP bounds");
+      }
 
       ShapeMap solidFaces;
       TopExp::MapShapes(shape->second, TopAbs_FACE, solidFaces);

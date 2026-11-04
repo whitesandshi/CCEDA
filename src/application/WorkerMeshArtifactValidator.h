@@ -10,6 +10,12 @@
 
 namespace cceda::application
 {
+struct WorkerMeshArtifactRegionExpectation
+{
+  domain::MeshRegionId regionId = 0;
+  std::string sourceSolidGeometryId;
+};
+
 struct WorkerMeshArtifactExpectation
 {
   domain::GeometryRevision sourceGeometryRevision = 0;
@@ -18,8 +24,7 @@ struct WorkerMeshArtifactExpectation
   std::uint64_t nodeCount = 0;
   std::uint64_t triangleCount = 0;
   std::uint64_t tetrahedronCount = 0;
-  domain::MeshRegionId regionId = 0;
-  std::string sourceSolidGeometryId;
+  std::vector<WorkerMeshArtifactRegionExpectation> regions;
 };
 
 enum class WorkerMeshArtifactValidationCode

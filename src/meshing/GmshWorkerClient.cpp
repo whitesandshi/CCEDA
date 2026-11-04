@@ -10,6 +10,13 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <utility>
 
@@ -62,6 +69,98 @@ bool contains(const QJsonArray& values, const QJsonValue& expected)
   return std::any_of(values.cbegin(), values.cend(),
     [&](const QJsonValue& value) { return value == expected; });
 }
+
+std::optional<std::uint64_t> nonNegativeInteger(const QJsonValue& value)
+{
+  if (!value.isDouble())
+  {
+    return std::nullopt;
+  }
+  const qint64 integer = value.toInteger(-1);
+  if (integer < 0 || value.toDouble() != static_cast<double>(integer))
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(integer);
+}
+
+std::optional<domain::MeshGenerationSettings> parseMeshingSettings(
+  const QJsonObject& object)
+{
+  if (object.size() != 6
+    || !object.value("minimumSizeMm").isDouble()
+    || !object.value("maximumSizeMm").isDouble()
+    || !object.value("curvatureElementsPerCircle").isDouble()
+    || !object.value("optimizeTetrahedra").isBool()
+    || !object.value("maximumThreads").isDouble()
+    || !object.value("algorithm").isString())
+  {
+    return std::nullopt;
+  }
+  const qint64 curvature =
+    object.value("curvatureElementsPerCircle").toInteger(-1);
+  const qint64 threads = object.value("maximumThreads").toInteger(-1);
+  const QString algorithmId = object.value("algorithm").toString();
+  const std::optional<domain::MeshGenerationAlgorithm> algorithm =
+    algorithmId == "delaunay"
+      ? std::optional(domain::MeshGenerationAlgorithm::Delaunay)
+      : algorithmId == "hxt"
+        ? std::optional(domain::MeshGenerationAlgorithm::Hxt)
+        : std::nullopt;
+  if (curvature < 0
+    || curvature > static_cast<qint64>(
+      domain::MaximumCurvatureElementsPerCircle)
+    || threads < 0
+    || threads > static_cast<qint64>(domain::MaximumMeshingThreads)
+    || object.value("curvatureElementsPerCircle").toDouble()
+      != static_cast<double>(curvature)
+    || !algorithm
+    || object.value("maximumThreads").toDouble()
+      != static_cast<double>(threads))
+  {
+    return std::nullopt;
+  }
+  domain::MeshGenerationSettings settings{
+    object.value("minimumSizeMm").toDouble(),
+    object.value("maximumSizeMm").toDouble(),
+    static_cast<std::uint32_t>(curvature),
+    object.value("optimizeTetrahedra").toBool(),
+    static_cast<std::uint32_t>(threads),
+    *algorithm,
+  };
+  return domain::isValidMeshGenerationSettings(settings)
+    ? std::optional<domain::MeshGenerationSettings>(settings)
+    : std::nullopt;
+}
+
+std::optional<domain::MeshingResourceLimits> parseResourceLimits(
+  const QJsonObject& object)
+{
+  if (object.size() != 2)
+  {
+    return std::nullopt;
+  }
+  const auto elapsed = nonNegativeInteger(
+    object.value("maximumElapsedMilliseconds"));
+  const auto workingSet = nonNegativeInteger(
+    object.value("maximumWorkingSetBytes"));
+  if (!elapsed || !workingSet)
+  {
+    return std::nullopt;
+  }
+  const domain::MeshingResourceLimits limits{*elapsed, *workingSet};
+  return domain::isValidMeshingResourceLimits(limits)
+    ? std::optional<domain::MeshingResourceLimits>(limits)
+    : std::nullopt;
+}
+
+bool sameResourceLimits(
+  const domain::MeshingResourceLimits& left,
+  const domain::MeshingResourceLimits& right) noexcept
+{
+  return left.maximumElapsedMilliseconds == right.maximumElapsedMilliseconds
+    && left.maximumWorkingSetBytes == right.maximumWorkingSetBytes;
+}
 }
 
 class GmshWorkerClient::Implementation
@@ -71,6 +170,8 @@ public:
     : owner_(owner)
   {
     cancellationDeadline_.setSingleShot(true);
+    resourceDeadline_.setSingleShot(true);
+    resourceDeadline_.setTimerType(Qt::PreciseTimer);
     // Qt documents QProcess as a sequential I/O device and provides these
     // signals for asynchronous output, errors, and completion.
     // https://doc.qt.io/qt-6.8/qprocess.html#communicating-via-channels
@@ -78,6 +179,19 @@ public:
       owner_, [this] { consumeOutput(); });
     QObject::connect(&process_, &QProcess::readyReadStandardError,
       owner_, [this] { consumeErrorOutput(); });
+#ifdef _WIN32
+    QObject::connect(&process_, &QProcess::started,
+      owner_, [this] {
+        if (!assignWorkerToJobObject())
+        {
+          fail(makeFailure(
+            GmshWorkerFailureKind::WorkerLost,
+            "MESH_WORKER_LOST",
+            "initializing",
+            "Cannot place the Worker process tree in its Windows Job Object"));
+        }
+      });
+#endif
     QObject::connect(&process_, &QProcess::errorOccurred,
       owner_, [this](QProcess::ProcessError error) {
         if (error != QProcess::UnknownError && !forcedCancellation_)
@@ -95,6 +209,10 @@ public:
       owner_,
       [this](int exitCode, QProcess::ExitStatus exitStatus) {
         cancellationDeadline_.stop();
+        resourceDeadline_.stop();
+#ifdef _WIN32
+        closeJobObject();
+#endif
         consumeOutput();
         consumeErrorOutput();
         if (terminalEmitted_)
@@ -152,6 +270,18 @@ public:
         terminalEmitted_ = true;
         emit owner_->succeeded(*pendingResult_);
       });
+    QObject::connect(&resourceDeadline_, &QTimer::timeout,
+      owner_, [this] {
+        if (!terminalEmitted_ && process_.state() != QProcess::NotRunning)
+        {
+          fail(makeFailure(
+            GmshWorkerFailureKind::ResourceLimitExceeded,
+            "MESH_RESOURCE_LIMIT",
+            lastStage_,
+            QString("Meshing exceeded the configured %1 ms wall-clock limit")
+              .arg(request_.resourceLimits.maximumElapsedMilliseconds)));
+        }
+      });
     QObject::connect(&cancellationDeadline_, &QTimer::timeout,
       owner_, [this] {
         if (!terminalEmitted_ && cancellationRequested_
@@ -168,10 +298,12 @@ public:
 
   ~Implementation()
   {
+#ifdef _WIN32
+    closeJobObject();
+#endif
     if (process_.state() != QProcess::NotRunning)
     {
       process_.kill();
-      process_.waitForFinished(5000);
     }
   }
 
@@ -187,6 +319,7 @@ public:
     }
     if (request.jobId.isEmpty() || request.mainBuildId.isEmpty()
       || request.sourceGeometryRevision == 0
+      || !domain::isValidMeshingResourceLimits(request.resourceLimits)
       || !QDir::isAbsolutePath(request.workspace)
       || !QFileInfo(request.workspace).isDir()
       || !QFileInfo(QDir(request.workspace).filePath("request.json")).isFile()
@@ -202,12 +335,25 @@ public:
         "Worker launch paths, identity, revision, or request file are invalid");
     }
 
+#ifdef _WIN32
+    if (!createJobObject())
+    {
+      return makeFailure(
+        GmshWorkerFailureKind::WorkerLost,
+        "MESH_WORKER_LOST",
+        "initializing",
+        "Cannot create the Windows Job Object for the Worker process tree");
+    }
+#endif
+
     request_ = request;
     outputBuffer_.clear();
     errorOutput_.clear();
     pendingResult_.reset();
     pendingCancellation_.reset();
     lastStage_ = "initializing";
+    lastElapsedMilliseconds_.reset();
+    maximumWorkingSetBytes_ = 0;
     helloReceived_ = false;
     terminalEmitted_ = false;
     cancellationRequested_ = false;
@@ -216,9 +362,15 @@ public:
     cancellationReason_.clear();
     cancellationDeadlineUtc_.clear();
     cancellationDeadline_.stop();
+    resourceDeadline_.stop();
 
     process_.setWorkingDirectory(request.workspace);
     process_.setProcessChannelMode(QProcess::SeparateChannels);
+    if (request.resourceLimits.maximumElapsedMilliseconds > 0)
+    {
+      resourceDeadline_.start(static_cast<int>(
+        request.resourceLimits.maximumElapsedMilliseconds));
+    }
     process_.start(request.workerExecutable,
       {"--workspace", request.workspace, "--gmsh", request.gmshExecutable},
       QIODevice::ReadWrite);
@@ -267,6 +419,58 @@ public:
   }
 
 private:
+#ifdef _WIN32
+  bool createJobObject()
+  {
+    closeJobObject();
+    workerJob_ = CreateJobObjectW(nullptr, nullptr);
+    if (workerJob_ == nullptr)
+    {
+      return false;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+        workerJob_, JobObjectExtendedLimitInformation,
+        &limits, sizeof(limits)))
+    {
+      closeJobObject();
+      return false;
+    }
+    return true;
+  }
+
+  bool assignWorkerToJobObject()
+  {
+    if (workerJob_ == nullptr || process_.processId() == 0)
+    {
+      return false;
+    }
+    HANDLE processHandle = OpenProcess(
+      PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+      FALSE,
+      static_cast<DWORD>(process_.processId()));
+    if (processHandle == nullptr)
+    {
+      return false;
+    }
+    const bool assigned = AssignProcessToJobObject(
+      workerJob_, processHandle) != FALSE;
+    CloseHandle(processHandle);
+    return assigned;
+  }
+
+  void closeJobObject() noexcept
+  {
+    if (workerJob_ != nullptr)
+    {
+      CloseHandle(workerJob_);
+      workerJob_ = nullptr;
+    }
+  }
+#endif
+
   GmshWorkerFailure protocolFailure(QString detail) const
   {
     return makeFailure(
@@ -358,7 +562,8 @@ private:
         || !contains(capabilities.value("dimensions").toArray(), 3)
         || !contains(capabilities.value("elementTypes").toArray(), "Triangle3")
         || !contains(capabilities.value("elementTypes").toArray(), "Tetrahedron4")
-        || !contains(capabilities.value("modes").toArray(), "independent-solids"))
+        || !contains(capabilities.value("modes").toArray(), "independent-solids")
+        || !capabilities.value("quality").toBool(false))
       {
         fail(protocolFailure("The first Worker message must be a compatible Gmsh hello"));
         return false;
@@ -421,7 +626,14 @@ private:
     {
       const QString stage = payload.value("stage").toString();
       const QJsonValue percentValue = payload.value("percent");
+      const auto elapsedMilliseconds =
+        nonNegativeInteger(payload.value("elapsedMilliseconds"));
+      const auto workingSetBytes =
+        nonNegativeInteger(payload.value("workingSetBytes"));
       if (stage.isEmpty()
+        || !elapsedMilliseconds || !workingSetBytes
+        || (lastElapsedMilliseconds_
+          && *elapsedMilliseconds < *lastElapsedMilliseconds_)
         || (percentValue.isDouble()
           && (percentValue.toInt(-1) < 0 || percentValue.toInt(-1) > 100)))
       {
@@ -429,12 +641,17 @@ private:
         return false;
       }
       lastStage_ = stage;
+      lastElapsedMilliseconds_ = elapsedMilliseconds;
+      maximumWorkingSetBytes_ =
+        std::max(maximumWorkingSetBytes_, *workingSetBytes);
       GmshWorkerProgress progress;
       progress.stage = stage;
       if (percentValue.isDouble())
       {
         progress.percent = percentValue.toInt();
       }
+      progress.elapsedMilliseconds = *elapsedMilliseconds;
+      progress.workingSetBytes = *workingSetBytes;
       emit owner_->progressChanged(progress);
       return true;
     }
@@ -442,8 +659,10 @@ private:
     if (type == "error")
     {
       GmshWorkerFailure failure;
-      failure.kind = GmshWorkerFailureKind::WorkerReportedError;
       failure.code = payload.value("code").toString();
+      failure.kind = failure.code == "MESH_RESOURCE_LIMIT"
+        ? GmshWorkerFailureKind::ResourceLimitExceeded
+        : GmshWorkerFailureKind::WorkerReportedError;
       failure.stage = payload.value("stage").toString();
       failure.detail = payload.value("detail").toString();
       failure.retryable = payload.value("retryable").toBool(false);
@@ -475,6 +694,17 @@ private:
         payload.value("meshBinarySha256").toString();
       const QString geometryMapResultSha256 =
         payload.value("geometryMapResultSha256").toString();
+      const QString qualitySha256 =
+        payload.value("qualitySha256").toString();
+      const auto effectiveSettings = parseMeshingSettings(
+        payload.value("effectiveSettings").toObject());
+      const auto effectiveResourceLimits = parseResourceLimits(
+        payload.value("effectiveResourceLimits").toObject());
+      const QJsonObject statistics = payload.value("statistics").toObject();
+      const auto elapsedMilliseconds =
+        nonNegativeInteger(statistics.value("elapsedMilliseconds"));
+      const auto peakWorkingSetBytes =
+        nonNegativeInteger(statistics.value("peakWorkingSetBytes"));
       if (revision <= 0
         || static_cast<domain::GeometryRevision>(revision)
           != request_.sourceGeometryRevision
@@ -482,6 +712,15 @@ private:
         || !isRelativeWorkspacePath(resultPath)
         || !isSha256(meshSha256)
         || !isSha256(meshBinarySha256)
+        || !isSha256(qualitySha256)
+        || !effectiveSettings
+        || !effectiveResourceLimits
+        || !sameResourceLimits(*effectiveResourceLimits, request_.resourceLimits)
+        || statistics.size() != 2
+        || !elapsedMilliseconds || !peakWorkingSetBytes
+        || (lastElapsedMilliseconds_
+          && *elapsedMilliseconds < *lastElapsedMilliseconds_)
+        || *peakWorkingSetBytes < maximumWorkingSetBytes_
         || (payload.contains("geometryMapResultSha256")
           && !isSha256(geometryMapResultSha256)))
       {
@@ -494,9 +733,14 @@ private:
         meshSha256,
         meshBinarySha256,
         geometryMapResultSha256,
+        qualitySha256,
         static_cast<std::uint64_t>(nodes),
         static_cast<std::uint64_t>(triangles),
         static_cast<std::uint64_t>(tetrahedra),
+        *elapsedMilliseconds,
+        *peakWorkingSetBytes,
+        *effectiveSettings,
+        *effectiveResourceLimits,
       };
       return true;
     }
@@ -561,9 +805,14 @@ private:
     }
     terminalEmitted_ = true;
     cancellationDeadline_.stop();
+    resourceDeadline_.stop();
+#ifdef _WIN32
+    closeJobObject();
+#endif
     if (process_.state() != QProcess::NotRunning)
     {
       process_.kill();
+      process_.waitForFinished(5000);
     }
     emit owner_->failed(failure);
   }
@@ -571,12 +820,18 @@ private:
   GmshWorkerClient* owner_ = nullptr;
   QProcess process_;
   QTimer cancellationDeadline_;
+  QTimer resourceDeadline_;
+#ifdef _WIN32
+  HANDLE workerJob_ = nullptr;
+#endif
   GmshWorkerLaunchRequest request_;
   QByteArray outputBuffer_;
   QByteArray errorOutput_;
   std::optional<GmshWorkerResult> pendingResult_;
   std::optional<GmshWorkerCancellation> pendingCancellation_;
   QString lastStage_;
+  std::optional<std::uint64_t> lastElapsedMilliseconds_;
+  std::uint64_t maximumWorkingSetBytes_ = 0;
   bool helloReceived_ = false;
   bool terminalEmitted_ = false;
   bool cancellationRequested_ = false;

@@ -4,6 +4,7 @@
 #include <QPaintEngine>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <cmath>
@@ -40,6 +41,9 @@ void OccViewportWidget::showEvent(QShowEvent* event)
     {
       controller_->attach(static_cast<visualization::NativeWindowHandle>(winId()));
       attached_ = true;
+      QTimer::singleShot(0, this, [this] {
+        controller_->resize();
+      });
     }
     catch (const std::exception&)
     {

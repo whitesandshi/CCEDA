@@ -22,6 +22,8 @@
 #include <gp.hxx>
 #include <gp_Pln.hxx>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -104,7 +106,7 @@ int main(int argc, char** argv)
     const GeometrySnapshot& snapshot = *created.snapshot;
     expect(snapshot.sourceGeometryRevision == imported.document.revision,
       "snapshot owns the exact imported revision");
-    expect(snapshot.schemaMajor == 0 && snapshot.schemaMinor == 1,
+    expect(snapshot.schemaMajor == 0 && snapshot.schemaMinor == 2,
       "geometry map schema is explicitly versioned");
     expect(snapshot.canonicalUnit == "mm", "snapshot uses the canonical millimeter unit");
     expect(!snapshot.transformsBaked,
@@ -171,6 +173,13 @@ int main(int argc, char** argv)
         "each source Solid occurs in exactly one independent region");
       expect(region.brepLocation.size() == 16,
         "each region carries one explicit 4x4 BREP location matrix");
+      const auto& bounds = region.brepBoundsMm;
+      expect(std::all_of(bounds.begin(), bounds.end(),
+          [](double value) { return std::isfinite(value); })
+          && bounds[0] <= bounds[3]
+          && bounds[1] <= bounds[4]
+          && bounds[2] <= bounds[5],
+        "each region carries finite ordered BREP bounds in millimeters");
     }
     expect(geometryService.currentDocument().revision == imported.document.revision,
       "creating a snapshot does not mutate canonical geometry");

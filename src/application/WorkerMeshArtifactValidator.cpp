@@ -1,6 +1,8 @@
 #include "application/WorkerMeshArtifactValidator.h"
 
 #include <utility>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cceda::application
 {
@@ -22,11 +24,25 @@ WorkerMeshArtifactValidationResult validateWorkerMeshArtifact(
   if (expectation.sourceGeometryRevision == 0
     || expectation.backendId.empty() || expectation.backendVersion.empty()
     || expectation.nodeCount == 0 || expectation.triangleCount == 0
-    || expectation.tetrahedronCount == 0 || expectation.regionId == 0
-    || expectation.sourceSolidGeometryId.empty())
+    || expectation.tetrahedronCount == 0 || expectation.regions.empty()
+    || expectation.regions.size() > limits.maximumRegions)
   {
     return fail(WorkerMeshArtifactValidationCode::InvalidExpectation,
       "Worker mesh expectations must contain positive counts and stable identity");
+  }
+
+  std::unordered_map<domain::MeshRegionId, std::string> expectedRegions;
+  std::unordered_set<std::string> expectedSolidGeometryIds;
+  for (const WorkerMeshArtifactRegionExpectation& region : expectation.regions)
+  {
+    if (region.regionId == 0 || region.sourceSolidGeometryId.empty()
+      || !expectedRegions.emplace(
+        region.regionId, region.sourceSolidGeometryId).second)
+    {
+      return fail(WorkerMeshArtifactValidationCode::InvalidExpectation,
+        "Worker mesh region expectations must have unique positive IDs and stable Solid identities");
+    }
+    expectedSolidGeometryIds.insert(region.sourceSolidGeometryId);
   }
 
   meshing::MeshBinaryReadResult decoded = meshing::readMeshBinary(
@@ -62,30 +78,39 @@ WorkerMeshArtifactValidationResult validateWorkerMeshArtifact(
       "Neutral mesh metadata or counts do not match the Worker result");
   }
 
-  if (mesh.regions.size() != 1
-    || mesh.regions.front().id != expectation.regionId
-    || mesh.regions.front().sourceGeometryIds
-      != std::vector<std::string>{expectation.sourceSolidGeometryId})
+  if (mesh.regions.size() != expectedRegions.size())
   {
     return fail(WorkerMeshArtifactValidationCode::MappingMismatch,
-      "Neutral mesh region does not match the submitted Solid mapping");
+      "Neutral mesh regions do not match the submitted Solid mappings");
+  }
+  for (const domain::MeshRegion& region : mesh.regions)
+  {
+    const auto expected = expectedRegions.find(region.id);
+    if (expected == expectedRegions.end()
+      || region.sourceGeometryIds != std::vector<std::string>{expected->second})
+    {
+      return fail(WorkerMeshArtifactValidationCode::MappingMismatch,
+        "Neutral mesh region does not match the submitted Solid mapping");
+    }
   }
   for (const domain::MeshNode& node : mesh.nodes)
   {
     if (!node.geometryId.empty()
-      && node.geometryId != expectation.sourceSolidGeometryId)
+      && expectedSolidGeometryIds.find(node.geometryId)
+        == expectedSolidGeometryIds.end())
     {
       return fail(WorkerMeshArtifactValidationCode::MappingMismatch,
-        "Neutral mesh node references geometry outside the mapped Solid");
+        "Neutral mesh node references geometry outside the mapped Solids");
     }
   }
   for (const domain::MeshElement& element : mesh.elements)
   {
-    if (element.regionId != expectation.regionId
-      || element.geometryId != expectation.sourceSolidGeometryId)
+    const auto expected = expectedRegions.find(element.regionId);
+    if (expected == expectedRegions.end()
+      || element.geometryId != expected->second)
     {
       return fail(WorkerMeshArtifactValidationCode::MappingMismatch,
-        "Neutral mesh element references geometry outside the mapped Solid");
+        "Neutral mesh element does not match its mapped Solid region");
     }
   }
   return {std::move(mesh), WorkerMeshArtifactValidationCode::None, {}};

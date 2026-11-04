@@ -46,6 +46,18 @@ bool isSha256(const QString& digest)
   return pattern.match(digest).hasMatch();
 }
 
+QString algorithmId(domain::MeshGenerationAlgorithm algorithm)
+{
+  switch (algorithm)
+  {
+    case domain::MeshGenerationAlgorithm::Delaunay:
+      return "delaunay";
+    case domain::MeshGenerationAlgorithm::Hxt:
+      return "hxt";
+  }
+  return {};
+}
+
 bool isEmptyDirectory(const QString& path)
 {
   const QDir directory(path);
@@ -171,12 +183,8 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
     || request.sourceGeometryRevision == 0
     || !revisionFitsJson
     || request.maximumSnapshotBytes == 0
-    || !std::isfinite(request.minimumSizeMm)
-    || !std::isfinite(request.maximumSizeMm)
-    || request.minimumSizeMm < 0.0
-    || request.maximumSizeMm < 0.0
-    || (request.maximumSizeMm != 0.0
-      && request.minimumSizeMm > request.maximumSizeMm)
+    || !domain::isValidMeshGenerationSettings(request.settings)
+    || !domain::isValidMeshingResourceLimits(request.resourceLimits)
     || (workspaceInfo.exists()
       && (!workspaceInfo.isDir() || workspaceInfo.isSymbolicLink())))
   {
@@ -280,10 +288,23 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
       {"meshBinaryPath", "output/result.meshbin"},
       {"geometryMapResultPath", "output/geometry-map-result.json"},
       {"resultPath", "output/result.json"},
+      {"qualityPath", "output/quality.json"},
     }},
     {"settings", QJsonObject{
-      {"minimumSizeMm", request.minimumSizeMm},
-      {"maximumSizeMm", request.maximumSizeMm},
+      {"minimumSizeMm", request.settings.minimumSizeMm},
+      {"maximumSizeMm", request.settings.maximumSizeMm},
+      {"curvatureElementsPerCircle",
+        static_cast<qint64>(request.settings.curvatureElementsPerCircle)},
+      {"optimizeTetrahedra", request.settings.optimizeTetrahedra},
+      {"maximumThreads",
+        static_cast<qint64>(request.settings.maximumThreads)},
+      {"algorithm", algorithmId(request.settings.algorithm)},
+    }},
+    {"resourceLimits", QJsonObject{
+      {"maximumElapsedMilliseconds",
+        static_cast<qint64>(request.resourceLimits.maximumElapsedMilliseconds)},
+      {"maximumWorkingSetBytes",
+        static_cast<qint64>(request.resourceLimits.maximumWorkingSetBytes)},
     }},
   };
   const QByteArray requestBytes =
@@ -308,6 +329,7 @@ GmshJobWorkspaceResult prepareGmshSnapshotJobWorkspace(
       root.filePath("output/gmsh-intermediate.msh"),
       root.filePath("output/result.meshbin"),
       root.filePath("output/geometry-map-result.json"),
+      root.filePath("output/quality.json"),
       root.filePath("output/result.json"),
     },
     GmshJobWorkspaceErrorCode::None,

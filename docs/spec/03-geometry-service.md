@@ -174,6 +174,9 @@ Contains target revision, issue IDs, ordered actions/parameters, classification 
 - Include geometry revision and SHA-256.
 - Include only participating valid Solids; first release defaults to all valid Solids.
 - Preserve a separate source-region mapping in independent mode.
+- Record finite ordered axis-aligned BREP bounds for each located Solid in
+  canonical millimeters. Bounds are computed from geometry without adding
+  triangulation and are sealed by the mapping-file SHA-256.
 - Prefer existing shared topology in conformal mode.
 - Run task-only imprint/fragmentation on a copy, never silently on canonical project geometry.
 - Output original-Solid to task-region mapping for any task-only topology changes.

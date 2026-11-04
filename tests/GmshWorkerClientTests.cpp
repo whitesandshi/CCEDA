@@ -52,7 +52,9 @@ private:
 bool writeRequest(
   const QString& workspace,
   const QString& sourceStep,
-  cceda::domain::GeometryRevision requestRevision)
+  cceda::domain::GeometryRevision requestRevision,
+  cceda::domain::MeshGenerationSettings settings = {},
+  cceda::domain::MeshingResourceLimits resourceLimits = {})
 {
   const auto repository =
     std::make_shared<cceda::geometry::OccGeometryRepository>();
@@ -88,8 +90,8 @@ bool writeRequest(
       QString::fromStdString(value.geometryMapSha256),
       "worker-client-test",
       requestRevision,
-      0.0,
-      0.0,
+      settings,
+      resourceLimits,
       4 * 1024 * 1024,
     });
   if (!result.succeeded())
@@ -107,6 +109,8 @@ struct RunOutcome
   std::optional<cceda::meshing::GmshWorkerFailure> failure;
   std::optional<cceda::meshing::GmshWorkerCancellation> cancellation;
   QStringList stages;
+  qint64 lastElapsedMilliseconds = -1;
+  std::uint64_t maximumWorkingSetBytes = 0;
 };
 
 RunOutcome runClient(const cceda::meshing::GmshWorkerLaunchRequest& request)
@@ -120,6 +124,10 @@ RunOutcome runClient(const cceda::meshing::GmshWorkerLaunchRequest& request)
   QObject::connect(&client, &cceda::meshing::GmshWorkerClient::progressChanged,
     &loop, [&](const cceda::meshing::GmshWorkerProgress& progress) {
       outcome.stages.push_back(progress.stage);
+      outcome.lastElapsedMilliseconds =
+        static_cast<qint64>(progress.elapsedMilliseconds);
+      outcome.maximumWorkingSetBytes = std::max(
+        outcome.maximumWorkingSetBytes, progress.workingSetBytes);
     });
   QObject::connect(&client, &cceda::meshing::GmshWorkerClient::succeeded,
     &loop, [&](const cceda::meshing::GmshWorkerResult& result) {
@@ -199,6 +207,7 @@ int runCancellationIgnoringWorker()
         {"dimensions", QJsonArray{3}},
         {"elementTypes", QJsonArray{"Triangle3", "Tetrahedron4"}},
         {"modes", QJsonArray{"independent-solids"}},
+        {"quality", true},
       }},
     }},
   };
@@ -379,15 +388,19 @@ int main(int argc, char* argv[])
   }
 
   TestWorkspace successWorkspace("success");
+  const cceda::domain::MeshingResourceLimits successLimits{
+    120'000, 2ULL * 1024ULL * 1024ULL * 1024ULL};
   if (!expect(successWorkspace.isValid(), "success workspace is unavailable")
-    || !expect(writeRequest(successWorkspace.path(), stepPath, 1),
+    || !expect(writeRequest(successWorkspace.path(), stepPath, 1,
+      {0.0, 0.0, 18, true, 2}, successLimits),
       "cannot write the success request"))
   {
     return 1;
   }
 
   const RunOutcome success = runClient({
-    workerPath, gmshPath, successWorkspace.path(), "worker-client-test", 1, "client-tests",
+    workerPath, gmshPath, successWorkspace.path(), "worker-client-test", 1,
+    "client-tests", successLimits,
   });
   if (!expect(!success.timedOut, "valid Worker run timed out")
     || !expect(success.result.has_value(), "valid Worker run did not publish a result")
@@ -398,8 +411,57 @@ int main(int argc, char* argv[])
       "result does not expose the geometry-map digest")
     || !expect(success.result->meshBinarySha256.size() == 64,
       "result does not expose the neutral mesh digest")
+    || !expect(success.result->qualitySha256.size() == 64,
+      "result does not expose the quality digest")
+    || !expect(success.result->effectiveSettings.curvatureElementsPerCircle == 18
+        && success.result->effectiveSettings.optimizeTetrahedra
+        && success.result->effectiveSettings.maximumThreads == 2,
+      "result does not expose the effective advanced settings")
+    || !expect(success.result->effectiveResourceLimits.maximumElapsedMilliseconds
+          == 120'000
+        && success.result->effectiveResourceLimits.maximumWorkingSetBytes
+          == 2ULL * 1024ULL * 1024ULL * 1024ULL,
+      "result does not expose the effective resource limits")
+    || !expect(success.lastElapsedMilliseconds >= 0
+        && success.maximumWorkingSetBytes > 0
+        && success.result->elapsedMilliseconds
+          >= static_cast<std::uint64_t>(success.lastElapsedMilliseconds)
+        && success.result->peakWorkingSetBytes
+          >= success.maximumWorkingSetBytes,
+      "client does not preserve validated progress and result telemetry")
     || !expect(success.result->nodeCount > 0, "result has no nodes")
     || !expect(success.stages.contains("completed"), "completed progress was not observed"))
+  {
+    return 1;
+  }
+
+  TestWorkspace resourceWorkspace("resource-limit");
+  const cceda::domain::MeshingResourceLimits shortDeadline{250, 0};
+  if (!expect(resourceWorkspace.isValid(), "resource-limit workspace is unavailable")
+    || !expect(writeRequest(resourceWorkspace.path(), stepPath, 1, {}, shortDeadline),
+      "cannot write the resource-limit request"))
+  {
+    return 1;
+  }
+  const RunOutcome resourceLimited = runClient({
+    workerPath,
+    QCoreApplication::applicationFilePath(),
+    resourceWorkspace.path(),
+    "worker-client-test",
+    1,
+    "client-tests",
+    shortDeadline,
+  });
+  if (!expect(!resourceLimited.timedOut, "resource-limited Worker run timed out")
+    || !expect(!resourceLimited.result.has_value(),
+      "resource-limited Worker published a result")
+    || !expect(resourceLimited.failure.has_value(),
+      "resource-limited Worker did not fail")
+    || !expect(resourceLimited.failure->kind
+        == cceda::meshing::GmshWorkerFailureKind::ResourceLimitExceeded,
+      "resource-limited Worker returned the wrong failure kind")
+    || !expect(resourceLimited.failure->code == "MESH_RESOURCE_LIMIT",
+      "resource-limited Worker returned the wrong error code"))
   {
     return 1;
   }
@@ -489,6 +551,9 @@ int main(int argc, char* argv[])
     || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
       "output/result.meshbin")).exists(),
       "cancelled job retained a neutral mesh output")
+    || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
+      "output/quality.json")).exists(),
+      "cancelled job retained a quality output")
     || !expect(!QFileInfo(QDir(cooperativeWorkspace.path()).filePath(
       "output/result.json")).exists(),
       "cancelled job retained a result manifest"))

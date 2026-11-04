@@ -2,9 +2,15 @@
 
 #include "geometry/OccGeometryRepository.h"
 #include "geometry/OccGeometryService.h"
+#include "geometry/OccGeometrySnapshotService.h"
+#include "meshing/GmshMsh41MeshExporter.h"
+#include "platform/WindowsStagedFilePublisher.h"
 #include "visualization/OccViewportController.h"
 
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
+#include <QStandardPaths>
 #include <QTimer>
 
 #include <memory>
@@ -16,12 +22,22 @@
 
 namespace
 {
+cceda::application::MeshingRuntimeConfiguration meshingRuntimeConfiguration()
+{
+  return {
+      QDir(QCoreApplication::applicationDirPath()).filePath("cceda_gmsh_worker.exe"),
+      QString::fromWCharArray(CCEDA_GMSH_EXECUTABLE_PATH),
+      QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath("CCEDA/jobs"),
+      "cceda-ui-" + QCoreApplication::applicationVersion(),
+      512ULL * 1024ULL * 1024ULL,
+  };
+}
+
 void configureOcctResources()
 {
 #ifdef _WIN32
   const std::wstring root = CCEDA_OCC_RESOURCE_DIR;
-  const auto setPath = [&root](const wchar_t* name, const wchar_t* relative)
-  {
+  const auto setPath = [&root](const wchar_t* name, const wchar_t* relative) {
     SetEnvironmentVariableW(name, (root + L"/" + relative).c_str());
   };
   SetEnvironmentVariableW(L"CSF_LANGUAGE", L"us");
@@ -45,10 +61,18 @@ int main(int argc, char* argv[])
 
   const auto repository = std::make_shared<cceda::geometry::OccGeometryRepository>();
   const auto geometryService = std::make_shared<cceda::geometry::OccGeometryService>(repository);
+  const auto snapshotService =
+      std::make_shared<cceda::geometry::OccGeometrySnapshotService>(repository);
   const auto viewportController =
-    std::make_shared<cceda::visualization::OccViewportController>(repository);
+      std::make_shared<cceda::visualization::OccViewportController>(repository);
+  const auto meshExporter =
+      std::make_shared<cceda::meshing::GmshMsh41MeshExporter>();
+  const auto filePublisher =
+      std::make_shared<cceda::platform::WindowsStagedFilePublisher>();
 
-  cceda::ui::MainWindow window(geometryService, viewportController);
+  cceda::ui::MainWindow window(geometryService, snapshotService, viewportController,
+                               meshingRuntimeConfiguration(), meshExporter,
+                               filePublisher);
   window.show();
 
   if (argc > 1)

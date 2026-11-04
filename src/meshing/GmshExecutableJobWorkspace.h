@@ -1,6 +1,8 @@
 #pragma once
 
 #include "domain/Revisions.h"
+#include "domain/MeshGenerationSettings.h"
+#include "domain/MeshingResourceLimits.h"
 
 #include <QString>
 
@@ -18,8 +20,8 @@ struct GmshSnapshotJobWorkspaceRequest
   QString expectedGeometryMapSha256;
   QString jobId;
   domain::GeometryRevision sourceGeometryRevision = 0;
-  double minimumSizeMm = 0.0;
-  double maximumSizeMm = 0.0;
+  domain::MeshGenerationSettings settings;
+  domain::MeshingResourceLimits resourceLimits;
   std::uint64_t maximumSnapshotBytes = 0;
 };
 
@@ -34,6 +36,7 @@ struct PreparedGmshExecutableJob
   QString meshPath;
   QString meshBinaryPath;
   QString geometryMapResultPath;
+  QString qualityPath;
   QString resultPath;
 };
 

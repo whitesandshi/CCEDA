@@ -1,6 +1,9 @@
 #include "meshing/GeometryMap.h"
 #include "meshing/GmshMsh41Reader.h"
 #include "meshing/MeshBinaryCodec.h"
+#include "meshing/MeshQualityJson.h"
+#include "domain/MeshGenerationSettings.h"
+#include "domain/MeshingResourceLimits.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -10,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,6 +23,8 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
@@ -26,6 +32,7 @@
 
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
+#include <psapi.h>
 #else
 #include <poll.h>
 #include <unistd.h>
@@ -36,6 +43,78 @@ namespace
 constexpr int ProtocolMajor = 0;
 constexpr int ProtocolMinor = 1;
 constexpr qint64 MaximumJsonBytes = 64 * 1024;
+// MSH 4.1 writes one node and one element block per geometric entity. Large
+// CAD assemblies (for example ABC-dataset STEP models) routinely exceed the
+// previous 100 000-entity budget: a 115 MB BREP produced 643 180 entity
+// blocks. Keep a protective cap against absurd inputs while allowing such
+// models; the reader never materializes per-block state, so memory stays
+// proportional to the retained nodes and elements only.
+constexpr std::uint64_t MaximumMshEntityBlocks = 2'000'000;
+
+std::optional<std::uint32_t> boundedUnsignedInteger(
+  const QJsonValue& value,
+  std::uint32_t maximum)
+{
+  if (!value.isDouble())
+  {
+    return std::nullopt;
+  }
+  const qint64 integer = value.toInteger(-1);
+  if (integer < 0 || integer > static_cast<qint64>(maximum)
+    || value.toDouble() != static_cast<double>(integer))
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::uint32_t>(integer);
+}
+
+std::optional<std::uint64_t> boundedUnsignedInteger64(
+  const QJsonValue& value,
+  std::uint64_t maximum)
+{
+  if (!value.isDouble())
+  {
+    return std::nullopt;
+  }
+  const qint64 integer = value.toInteger(-1);
+  if (integer < 0 || static_cast<std::uint64_t>(integer) > maximum
+    || value.toDouble() != static_cast<double>(integer))
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(integer);
+}
+
+std::optional<cceda::domain::MeshGenerationAlgorithm> meshAlgorithm(
+  const QJsonValue& value)
+{
+  if (!value.isString())
+  {
+    return std::nullopt;
+  }
+  const QString id = value.toString();
+  if (id == "delaunay")
+  {
+    return cceda::domain::MeshGenerationAlgorithm::Delaunay;
+  }
+  if (id == "hxt")
+  {
+    return cceda::domain::MeshGenerationAlgorithm::Hxt;
+  }
+  return std::nullopt;
+}
+
+QString meshAlgorithmId(cceda::domain::MeshGenerationAlgorithm algorithm)
+{
+  return algorithm == cceda::domain::MeshGenerationAlgorithm::Hxt
+    ? "hxt" : "delaunay";
+}
+
+QString gmshAlgorithmId(cceda::domain::MeshGenerationAlgorithm algorithm)
+{
+  return algorithm == cceda::domain::MeshGenerationAlgorithm::Hxt
+    ? "hxt" : "del3d";
+}
 
 struct MeshCounts
 {
@@ -45,7 +124,165 @@ struct MeshCounts
   qint64 tetrahedra = 0;
   QSet<int> triangleSurfaceEntityTags;
   QSet<int> tetrahedronVolumeEntityTags;
+  QHash<int, std::array<double, 6>> volumeEntityBounds;
+  QHash<int, QSet<int>> volumeEntitySurfaceTags;
 };
+
+constexpr double GeometryBoundsToleranceMm = 1.0e-6;
+
+bool boundsEqual(
+  const std::array<double, 6>& left,
+  const std::array<double, 6>& right)
+{
+  return std::equal(left.begin(), left.end(), right.begin(),
+    [](double a, double b) {
+      return std::abs(a - b) <= GeometryBoundsToleranceMm;
+    });
+}
+
+struct ResolvedGeometryMapMapping
+{
+  cceda::meshing::GmshMeshMapping meshMapping;
+  QJsonArray serializedRegions;
+};
+
+std::optional<ResolvedGeometryMapMapping> resolveGeometryMapMapping(
+  const cceda::meshing::GeometryMap& geometryMap,
+  const MeshCounts& counts,
+  QString& error)
+{
+  ResolvedGeometryMapMapping result;
+  if (geometryMap.regions.size() == 1)
+  {
+    const cceda::meshing::GeometryMapRegion& region =
+      geometryMap.regions.front();
+    const std::string solidGeometryId = region.solidGeometryId.toStdString();
+    result.meshMapping.regions.push_back({
+      region.regionId,
+      {solidGeometryId},
+    });
+    QList<int> volumeTags = counts.tetrahedronVolumeEntityTags.values();
+    std::sort(volumeTags.begin(), volumeTags.end());
+    QJsonArray serializedVolumeTags;
+    for (const int volumeTag : volumeTags)
+    {
+      if (!counts.volumeEntityBounds.contains(volumeTag))
+      {
+        error = "A meshed Gmsh volume is absent from the Entities section";
+        return std::nullopt;
+      }
+      result.meshMapping.entities.push_back({
+        3, volumeTag, region.regionId, solidGeometryId,
+      });
+      serializedVolumeTags.append(volumeTag);
+    }
+    for (const int surfaceTag : counts.triangleSurfaceEntityTags)
+    {
+      result.meshMapping.entities.push_back({
+        2, surfaceTag, region.regionId, solidGeometryId,
+      });
+    }
+    result.serializedRegions.append(QJsonObject{
+      {"regionId", static_cast<qint64>(region.regionId)},
+      {"sourceSolidGeometryId", region.solidGeometryId},
+      {"gmshVolumeEntityTags", serializedVolumeTags},
+    });
+    return result;
+  }
+
+  QSet<int> assignedSurfaceTags;
+  QSet<int> matchedVolumeTags;
+  result.meshMapping.regions.reserve(geometryMap.regions.size());
+  for (const cceda::meshing::GeometryMapRegion& region : geometryMap.regions)
+  {
+    int matchedVolumeTag = 0;
+    double closestDifference = std::numeric_limits<double>::infinity();
+    int closestVolumeTag = 0;
+    for (auto entity = counts.volumeEntityBounds.constBegin();
+      entity != counts.volumeEntityBounds.constEnd(); ++entity)
+    {
+      double difference = 0.0;
+      for (std::size_t component = 0; component < region.brepBoundsMm.size();
+        ++component)
+      {
+        difference = std::max(difference,
+          std::abs(entity.value()[component] - region.brepBoundsMm[component]));
+      }
+      if (difference < closestDifference)
+      {
+        closestDifference = difference;
+        closestVolumeTag = entity.key();
+      }
+      if (!boundsEqual(entity.value(), region.brepBoundsMm))
+      {
+        continue;
+      }
+      if (matchedVolumeTag != 0)
+      {
+        error = "Snapshot region bounds match multiple Gmsh volume entities";
+        return std::nullopt;
+      }
+      matchedVolumeTag = entity.key();
+    }
+    if (matchedVolumeTag == 0
+      || !counts.tetrahedronVolumeEntityTags.contains(matchedVolumeTag)
+      || matchedVolumeTags.contains(matchedVolumeTag))
+    {
+      error = QString(
+        "Snapshot region bounds do not uniquely match a meshed Gmsh volume; "
+        "closest tag %1 differs by %2 mm")
+          .arg(closestVolumeTag)
+          .arg(closestDifference, 0, 'g', 17);
+      return std::nullopt;
+    }
+    const QSet<int> boundarySurfaces =
+      counts.volumeEntitySurfaceTags.value(matchedVolumeTag);
+    if (boundarySurfaces.isEmpty())
+    {
+      error = "Matched Gmsh volume has no boundary Surfaces";
+      return std::nullopt;
+    }
+
+    const std::string solidGeometryId = region.solidGeometryId.toStdString();
+    result.meshMapping.regions.push_back({
+      region.regionId,
+      {solidGeometryId},
+    });
+    result.meshMapping.entities.push_back({
+      3, matchedVolumeTag, region.regionId, solidGeometryId,
+    });
+    for (const int surfaceTag : boundarySurfaces)
+    {
+      if (!counts.triangleSurfaceEntityTags.contains(surfaceTag))
+      {
+        continue;
+      }
+      if (assignedSurfaceTags.contains(surfaceTag))
+      {
+        error = "A meshed Gmsh Surface belongs to multiple snapshot regions";
+        return std::nullopt;
+      }
+      assignedSurfaceTags.insert(surfaceTag);
+      result.meshMapping.entities.push_back({
+        2, surfaceTag, region.regionId, solidGeometryId,
+      });
+    }
+    matchedVolumeTags.insert(matchedVolumeTag);
+    result.serializedRegions.append(QJsonObject{
+      {"regionId", static_cast<qint64>(region.regionId)},
+      {"sourceSolidGeometryId", region.solidGeometryId},
+      {"gmshVolumeEntityTags", QJsonArray{matchedVolumeTag}},
+    });
+  }
+  if (matchedVolumeTags != counts.tetrahedronVolumeEntityTags
+    || assignedSurfaceTags != counts.triangleSurfaceEntityTags
+    || matchedVolumeTags.size() != counts.volumeEntityBounds.size())
+  {
+    error = "Gmsh entities do not exactly cover the submitted snapshot regions";
+    return std::nullopt;
+  }
+  return result;
+}
 
 QString utcTimestamp()
 {
@@ -70,23 +307,125 @@ void sendMessage(const QString& type, const QString& jobId, const QJsonObject& p
 
 int fail(const QString& jobId, const QString& code, const QString& stage, const QString& detail)
 {
+  const bool retryable = code == "MESH_SURFACE_GENERATION_FAILED"
+    || code == "MESH_VOLUME_GENERATION_FAILED";
   sendMessage("error", jobId, QJsonObject{
     {"code", code},
     {"stage", stage},
     {"summaryKey", "meshing.worker_failed"},
-    {"retryable", false},
+    {"retryable", retryable},
     {"detail", detail},
   });
   return 1;
 }
 
-void sendProgress(const QString& jobId, const QString& stage, int percent)
+std::uint64_t processWorkingSetBytes(QProcess* process)
 {
-  sendMessage("progress", jobId, QJsonObject{
+#ifdef Q_OS_WIN
+  HANDLE handle = GetCurrentProcess();
+  bool closeHandle = false;
+  if (process != nullptr)
+  {
+    const qint64 processId = process->processId();
+    if (processId <= 0)
+    {
+      return 0;
+    }
+    handle = OpenProcess(
+      PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+      FALSE,
+      static_cast<DWORD>(processId));
+    if (handle == nullptr)
+    {
+      return 0;
+    }
+    closeHandle = true;
+  }
+
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  const bool succeeded = GetProcessMemoryInfo(
+    handle, &counters, static_cast<DWORD>(sizeof(counters))) != FALSE;
+  if (closeHandle)
+  {
+    CloseHandle(handle);
+  }
+  return succeeded
+    ? static_cast<std::uint64_t>(counters.WorkingSetSize)
+    : 0;
+#else
+  Q_UNUSED(process);
+  return 0;
+#endif
+}
+
+class JobTelemetry
+{
+public:
+  JobTelemetry()
+  {
+    elapsed_.start();
+  }
+
+  QJsonObject progress(QProcess* backendProcess = nullptr)
+  {
+    const std::uint64_t workerBytes = processWorkingSetBytes(nullptr);
+    const std::uint64_t backendBytes = processWorkingSetBytes(backendProcess);
+    constexpr std::uint64_t MaximumJsonInteger =
+      static_cast<std::uint64_t>(std::numeric_limits<qint64>::max());
+    const std::uint64_t workingSetBytes =
+      workerBytes > MaximumJsonInteger
+        || backendBytes > MaximumJsonInteger - workerBytes
+        ? MaximumJsonInteger
+        : workerBytes + backendBytes;
+    currentWorkingSetBytes_ = workingSetBytes;
+    peakWorkingSetBytes_ = std::max(peakWorkingSetBytes_, workingSetBytes);
+    return {
+      {"elapsedMilliseconds", elapsed_.elapsed()},
+      {"workingSetBytes", static_cast<qint64>(workingSetBytes)},
+    };
+  }
+
+  QJsonObject statistics() const
+  {
+    return {
+      {"elapsedMilliseconds", elapsed_.elapsed()},
+      {"peakWorkingSetBytes", static_cast<qint64>(peakWorkingSetBytes_)},
+    };
+  }
+
+  [[nodiscard]] std::uint64_t elapsedMilliseconds() const noexcept
+  {
+    return static_cast<std::uint64_t>(elapsed_.elapsed());
+  }
+
+  [[nodiscard]] std::uint64_t workingSetBytes() const noexcept
+  {
+    return currentWorkingSetBytes_;
+  }
+
+private:
+  QElapsedTimer elapsed_;
+  std::uint64_t currentWorkingSetBytes_ = 0;
+  std::uint64_t peakWorkingSetBytes_ = 0;
+};
+
+void sendProgress(
+  const QString& jobId,
+  const QString& stage,
+  int percent,
+  JobTelemetry& telemetry,
+  QProcess* backendProcess = nullptr)
+{
+  QJsonObject payload{
     {"stage", stage},
     {"percent", percent},
     {"messageKey", QString("meshing.stage.%1").arg(stage)},
-  });
+  };
+  const QJsonObject sample = telemetry.progress(backendProcess);
+  payload.insert("elapsedMilliseconds", sample.value("elapsedMilliseconds"));
+  payload.insert("workingSetBytes", sample.value("workingSetBytes"));
+  sendMessage("progress", jobId, payload);
 }
 
 std::optional<QJsonObject> readJsonFile(const QString& path, QString& error)
@@ -385,6 +724,7 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
   QTextStream stream(&file);
   MeshCounts counts;
   bool asciiMsh41 = false;
+  bool sawEntities = false;
   bool sawNodes = false;
   bool sawElements = false;
   while (!stream.atEnd())
@@ -393,6 +733,100 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
     if (marker == "$MeshFormat")
     {
       asciiMsh41 = stream.readLine().simplified() == "4.1 0 8";
+    }
+    else if (marker == "$Entities")
+    {
+      const QStringList header =
+        stream.readLine().simplified().split(' ', Qt::SkipEmptyParts);
+      bool pointsOk = false;
+      bool curvesOk = false;
+      bool surfacesOk = false;
+      bool volumesOk = false;
+      const qint64 pointCount = header.value(0).toLongLong(&pointsOk);
+      const qint64 curveCount = header.value(1).toLongLong(&curvesOk);
+      const qint64 surfaceCount = header.value(2).toLongLong(&surfacesOk);
+      const qint64 volumeCount = header.value(3).toLongLong(&volumesOk);
+      if (header.size() != 4 || !pointsOk || !curvesOk || !surfacesOk
+        || !volumesOk || pointCount < 0 || curveCount < 0
+        || surfaceCount < 0 || volumeCount <= 0
+        || pointCount > 2'000'000 || curveCount > 2'000'000
+        || surfaceCount > 2'000'000 || volumeCount > 100'000)
+      {
+        error = "Invalid MSH 4.1 entity header";
+        return std::nullopt;
+      }
+      for (qint64 index = 0;
+        index < pointCount + curveCount + surfaceCount; ++index)
+      {
+        if (stream.readLine().isNull())
+        {
+          error = "Truncated MSH 4.1 entity block";
+          return std::nullopt;
+        }
+      }
+      for (qint64 index = 0; index < volumeCount; ++index)
+      {
+        const QStringList values =
+          stream.readLine().simplified().split(' ', Qt::SkipEmptyParts);
+        bool tagOk = false;
+        const int tag = values.value(0).toInt(&tagOk);
+        std::array<double, 6> bounds{};
+        bool boundsOk = values.size() >= 9;
+        for (qsizetype component = 0;
+          boundsOk && component < static_cast<qsizetype>(bounds.size());
+          ++component)
+        {
+          bool componentOk = false;
+          bounds[static_cast<std::size_t>(component)] =
+            values.value(component + 1).toDouble(&componentOk);
+          boundsOk = componentOk
+            && std::isfinite(bounds[static_cast<std::size_t>(component)]);
+        }
+        bool physicalCountOk = false;
+        const int physicalCount =
+          values.value(7).toInt(&physicalCountOk);
+        const qsizetype boundaryCountIndex =
+          8 + static_cast<qsizetype>(physicalCount);
+        bool boundaryCountOk = false;
+        const int boundaryCount =
+          physicalCountOk && physicalCount >= 0
+            ? values.value(boundaryCountIndex).toInt(&boundaryCountOk)
+            : -1;
+        if (!tagOk || tag <= 0 || !boundsOk
+          || bounds[0] > bounds[3] || bounds[1] > bounds[4]
+          || bounds[2] > bounds[5]
+          || !physicalCountOk || physicalCount < 0
+          || !boundaryCountOk || boundaryCount <= 0
+          || values.size() != boundaryCountIndex + 1 + boundaryCount
+          || counts.volumeEntityBounds.contains(tag))
+        {
+          error = "Invalid MSH 4.1 volume entity";
+          return std::nullopt;
+        }
+        QSet<int> surfaceTags;
+        for (int boundary = 0; boundary < boundaryCount; ++boundary)
+        {
+          bool surfaceTagOk = false;
+          const int orientedTag =
+            values.at(boundaryCountIndex + 1 + boundary)
+              .toInt(&surfaceTagOk);
+          if (!surfaceTagOk || orientedTag == 0
+            || orientedTag == std::numeric_limits<int>::min())
+          {
+            error = "Invalid MSH 4.1 volume boundary Surface";
+            return std::nullopt;
+          }
+          surfaceTags.insert(std::abs(orientedTag));
+        }
+        if (surfaceTags.size() != boundaryCount)
+        {
+          error = "Duplicate MSH 4.1 volume boundary Surface";
+          return std::nullopt;
+        }
+        counts.volumeEntityBounds.insert(tag, bounds);
+        counts.volumeEntitySurfaceTags.insert(tag, surfaceTags);
+      }
+      sawEntities = true;
     }
     else if (marker == "$Nodes")
     {
@@ -485,7 +919,8 @@ std::optional<MeshCounts> readMeshCounts(const QString& path, QString& error)
     error = "Expected ASCII MSH 4.1 intermediate output";
     return std::nullopt;
   }
-  if (!sawNodes || !sawElements || counts.triangles <= 0 || counts.tetrahedra <= 0
+  if (!sawEntities || !sawNodes || !sawElements
+    || counts.triangles <= 0 || counts.tetrahedra <= 0
     || counts.tetrahedronVolumeEntityTags.isEmpty())
   {
     error = "Mesh does not contain nodes, Triangle3, and Tetrahedron4 elements";
@@ -509,6 +944,31 @@ bool writeJsonAtomically(const QString& path, const QJsonObject& object, QString
   }
   return true;
 }
+
+bool writeByteArrayAtomically(
+  const QString& path,
+  const QByteArray& bytes,
+  QString& error)
+{
+  if (bytes.isEmpty())
+  {
+    error = "Artifact payload is empty";
+    return false;
+  }
+  QSaveFile file(path);
+  if (!file.open(QIODevice::WriteOnly))
+  {
+    error = QString("Cannot write %1: %2").arg(path, file.errorString());
+    return false;
+  }
+  if (file.write(bytes) != bytes.size() || !file.commit())
+  {
+    error = QString("Cannot commit %1: %2").arg(path, file.errorString());
+    return false;
+  }
+  return true;
+}
+
 
 bool writeBinaryAtomically(
   const QString& path,
@@ -625,8 +1085,8 @@ int main(int argc, char* argv[])
       {"dimensions", QJsonArray{3}},
       {"elementTypes", QJsonArray{"Triangle3", "Tetrahedron4"}},
       {"modes", QJsonArray{"independent-solids"}},
-      {"optimization", false},
-      {"quality", false},
+      {"optimization", true},
+      {"quality", true},
     }},
   });
 
@@ -651,14 +1111,16 @@ int main(int argc, char* argv[])
       "helloAck does not match Worker protocol or workspace");
   }
 
-  sendProgress(jobId, "initializing", 5);
+  JobTelemetry telemetry;
+  sendProgress(jobId, "initializing", 5, telemetry);
   const auto request = readJsonFile(QDir(workspace).filePath("request.json"), error);
   if (!request)
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing", error);
   }
   if (!hasOnlyKeys(*request,
-      {"protocol", "jobId", "sourceGeometryRevision", "geometry", "output", "settings"})
+      {"protocol", "jobId", "sourceGeometryRevision", "geometry", "output",
+        "settings", "resourceLimits"})
     || request->value("jobId").toString() != jobId
     || request->value("protocol").toObject().value("major").toInt(-1) != ProtocolMajor)
   {
@@ -670,6 +1132,21 @@ int main(int argc, char* argv[])
   const QJsonObject geometry = request->value("geometry").toObject();
   const QJsonObject output = request->value("output").toObject();
   const QJsonObject settings = request->value("settings").toObject();
+  const QJsonObject resourceLimits =
+    request->value("resourceLimits").toObject();
+  const auto curvatureElements = boundedUnsignedInteger(
+    settings.value("curvatureElementsPerCircle"),
+    cceda::domain::MaximumCurvatureElementsPerCircle);
+  const auto maximumThreads = boundedUnsignedInteger(
+    settings.value("maximumThreads"),
+    cceda::domain::MaximumMeshingThreads);
+  const auto algorithm = meshAlgorithm(settings.value("algorithm"));
+  const auto maximumElapsedMilliseconds = boundedUnsignedInteger64(
+    resourceLimits.value("maximumElapsedMilliseconds"),
+    cceda::domain::MaximumMeshingElapsedMilliseconds);
+  const auto maximumWorkingSetBytes = boundedUnsignedInteger64(
+    resourceLimits.value("maximumWorkingSetBytes"),
+    cceda::domain::MaximumMeshingWorkingSetBytes);
   const QJsonObject geometrySchema = geometry.value("schema").toObject();
   const QJsonObject brep = geometry.value("brep").toObject();
   const QJsonObject geometryMapArtifact = geometry.value("map").toObject();
@@ -686,12 +1163,18 @@ int main(int argc, char* argv[])
     || !hasOnlyKeys(brep, {"path", "sha256"})
     || !hasOnlyKeys(geometryMapArtifact, {"path", "sha256"})
     || !hasOnlyKeys(output,
-      {"meshPath", "meshBinaryPath", "geometryMapResultPath", "resultPath"})
-    || !hasOnlyKeys(settings, {"minimumSizeMm", "maximumSizeMm"})
-    || (settings.contains("minimumSizeMm")
-      && !settings.value("minimumSizeMm").isDouble())
-    || (settings.contains("maximumSizeMm")
-      && !settings.value("maximumSizeMm").isDouble()))
+      {"meshPath", "meshBinaryPath", "geometryMapResultPath",
+        "qualityPath", "resultPath"})
+    || !hasOnlyKeys(settings, {
+      "minimumSizeMm", "maximumSizeMm", "curvatureElementsPerCircle",
+      "optimizeTetrahedra", "maximumThreads", "algorithm"})
+    || !settings.value("minimumSizeMm").isDouble()
+    || !settings.value("maximumSizeMm").isDouble()
+    || !curvatureElements || !maximumThreads || !algorithm
+    || !settings.value("optimizeTetrahedra").isBool()
+    || !hasOnlyKeys(resourceLimits,
+      {"maximumElapsedMilliseconds", "maximumWorkingSetBytes"})
+    || !maximumElapsedMilliseconds || !maximumWorkingSetBytes)
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing",
       "request fields are missing or unsupported");
@@ -706,6 +1189,8 @@ int main(int argc, char* argv[])
       != "output/gmsh-intermediate.msh"
     || output.value("meshBinaryPath").toString()
       != "output/result.meshbin"
+    || output.value("qualityPath").toString()
+      != "output/quality.json"
     || output.value("geometryMapResultPath").toString()
       != "output/geometry-map-result.json"
     || output.value("resultPath").toString() != "output/result.json")
@@ -768,13 +1253,7 @@ int main(int argc, char* argv[])
         ? "Geometry map revision does not match request.json"
         : QString("Geometry map is invalid: %1").arg(parsed.detail));
   }
-  sendProgress(jobId, "preparing-topology", 25);
-  if (parsed.map->regions.size() != 1)
-  {
-    return fail(jobId, "MESH_TOPOLOGY_PREPARATION_FAILED",
-      "preparing-topology",
-      "Executable Worker can only prove Gmsh entity mapping for one snapshot region");
-  }
+  sendProgress(jobId, "preparing-topology", 25, telemetry);
   const cceda::meshing::GeometryMap parsedGeometryMap = *parsed.map;
   const auto resolvedGeometryMapResultPath = workspacePath(
     workspace, output.value("geometryMapResultPath").toString(), error);
@@ -787,9 +1266,11 @@ int main(int argc, char* argv[])
   const auto meshPath = workspacePath(workspace, output.value("meshPath").toString(), error);
   const auto meshBinaryPath = workspacePath(
     workspace, output.value("meshBinaryPath").toString(), error);
+  const auto qualityPath = workspacePath(
+    workspace, output.value("qualityPath").toString(), error);
   const auto resultPath = workspacePath(workspace, output.value("resultPath").toString(), error);
   const auto logPath = workspacePath(workspace, "logs/gmsh.log", error);
-  if (!meshPath || !meshBinaryPath || !resultPath || !logPath)
+  if (!meshPath || !meshBinaryPath || !qualityPath || !resultPath || !logPath)
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing", error);
   }
@@ -808,6 +1289,7 @@ int main(int argc, char* argv[])
     meshFileInfo.completeBaseName() + ".tmp." + meshFileInfo.suffix());
   if (!QDir().mkpath(QFileInfo(*meshPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*meshBinaryPath).absolutePath())
+    || !QDir().mkpath(QFileInfo(*qualityPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*resultPath).absolutePath())
     || !QDir().mkpath(QFileInfo(geometryMapResultPath).absolutePath())
     || !QDir().mkpath(QFileInfo(*logPath).absolutePath()))
@@ -815,6 +1297,16 @@ int main(int argc, char* argv[])
     return fail(jobId, "MESH_INPUT_INVALID", "initializing",
       "Cannot create controlled output directories");
   }
+
+  const auto removePublishedArtifacts = [&] {
+    QFile::remove(temporaryMeshPath);
+    QFile::remove(*meshPath);
+    QFile::remove(*meshBinaryPath);
+    QFile::remove(geometryMapResultPath);
+    QFile::remove(*qualityPath);
+    QFile::remove(*resultPath);
+  };
+
 
   auto checkCancellation =
     [&](QProcess* backendProcess, const QString& stage) -> std::optional<int> {
@@ -832,7 +1324,7 @@ int main(int argc, char* argv[])
           backendProcess->kill();
           backendProcess->waitForFinished(5000);
         }
-        QFile::remove(temporaryMeshPath);
+        removePublishedArtifacts();
         return fail(jobId, "MESH_WORKER_LOST", stage, control.error);
       }
 
@@ -847,7 +1339,7 @@ int main(int argc, char* argv[])
           backendProcess->kill();
           backendProcess->waitForFinished(5000);
         }
-        QFile::remove(temporaryMeshPath);
+        removePublishedArtifacts();
         return fail(jobId, "MESH_PROTOCOL_INCOMPATIBLE", stage, cancellationError);
       }
 
@@ -861,11 +1353,7 @@ int main(int argc, char* argv[])
         backendProcess->kill();
         backendProcess->waitForFinished(5000);
       }
-      QFile::remove(temporaryMeshPath);
-      QFile::remove(*meshPath);
-      QFile::remove(*meshBinaryPath);
-      QFile::remove(geometryMapResultPath);
-      QFile::remove(*resultPath);
+      removePublishedArtifacts();
       sendMessage("cancelled", jobId, QJsonObject{
         {"reason", cancellation->reason},
         {"stage", stage},
@@ -874,17 +1362,64 @@ int main(int argc, char* argv[])
       return 0;
     };
 
-  const double minimumSize = settings.value("minimumSizeMm").toDouble(0.0);
-  const double maximumSize = settings.value("maximumSizeMm").toDouble(0.0);
-  if (minimumSize < 0.0 || maximumSize < 0.0
-    || (maximumSize > 0.0 && minimumSize > maximumSize))
+  const cceda::domain::MeshGenerationSettings effectiveSettings{
+    settings.value("minimumSizeMm").toDouble(),
+    settings.value("maximumSizeMm").toDouble(),
+    *curvatureElements,
+    settings.value("optimizeTetrahedra").toBool(),
+    *maximumThreads,
+    *algorithm,
+  };
+  const cceda::domain::MeshingResourceLimits effectiveResourceLimits{
+    *maximumElapsedMilliseconds,
+    *maximumWorkingSetBytes,
+  };
+  if (!cceda::domain::isValidMeshGenerationSettings(effectiveSettings)
+    || !cceda::domain::isValidMeshingResourceLimits(effectiveResourceLimits))
   {
     return fail(jobId, "MESH_INPUT_INVALID", "initializing",
-      "Invalid minimum/maximum mesh size");
+      "Meshing settings or resource limits are outside protocol-0.1 limits");
   }
 
-  sendProgress(jobId, "loading-geometry", 15);
-  sendProgress(jobId, "generating-volume", 35);
+  const auto checkResourceLimits =
+    [&](QProcess* backendProcess, const QString& stage) -> std::optional<int> {
+      const bool elapsedExceeded =
+        effectiveResourceLimits.maximumElapsedMilliseconds > 0
+        && telemetry.elapsedMilliseconds()
+          >= effectiveResourceLimits.maximumElapsedMilliseconds;
+      const bool workingSetExceeded =
+        effectiveResourceLimits.maximumWorkingSetBytes > 0
+        && telemetry.workingSetBytes()
+          >= effectiveResourceLimits.maximumWorkingSetBytes;
+      if (!elapsedExceeded && !workingSetExceeded)
+      {
+        return std::nullopt;
+      }
+      if (backendProcess != nullptr
+        && backendProcess->state() != QProcess::NotRunning)
+      {
+        backendProcess->kill();
+        backendProcess->waitForFinished(5000);
+      }
+      removePublishedArtifacts();
+      return fail(jobId, "MESH_RESOURCE_LIMIT", stage,
+        elapsedExceeded
+          ? QString("Meshing exceeded the configured %1 ms wall-clock limit")
+              .arg(effectiveResourceLimits.maximumElapsedMilliseconds)
+          : QString("Meshing exceeded the configured %1 byte working-set limit")
+              .arg(effectiveResourceLimits.maximumWorkingSetBytes));
+    };
+
+  sendProgress(jobId, "loading-geometry", 15, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "loading-geometry"))
+  {
+    return *limited;
+  }
+  sendProgress(jobId, "generating-volume", 35, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "generating-volume"))
+  {
+    return *limited;
+  }
   if (const auto cancelled = checkCancellation(nullptr, "generating-volume"))
   {
     return *cancelled;
@@ -897,14 +1432,31 @@ int main(int argc, char* argv[])
     "-o", temporaryMeshPath,
     "-nopopup",
     "-v", "4",
+    "-algo", gmshAlgorithmId(effectiveSettings.algorithm),
   };
-  if (minimumSize > 0.0)
+  if (effectiveSettings.minimumSizeMm > 0.0)
   {
-    gmshArguments << "-clmin" << QString::number(minimumSize, 'g', 17);
+    gmshArguments << "-clmin"
+      << QString::number(effectiveSettings.minimumSizeMm, 'g', 17);
   }
-  if (maximumSize > 0.0)
+  if (effectiveSettings.maximumSizeMm > 0.0)
   {
-    gmshArguments << "-clmax" << QString::number(maximumSize, 'g', 17);
+    gmshArguments << "-clmax"
+      << QString::number(effectiveSettings.maximumSizeMm, 'g', 17);
+  }
+  if (effectiveSettings.curvatureElementsPerCircle > 0)
+  {
+    gmshArguments << "-clcurv"
+      << QString::number(effectiveSettings.curvatureElementsPerCircle);
+  }
+  if (effectiveSettings.optimizeTetrahedra)
+  {
+    gmshArguments << "-optimize";
+  }
+  if (effectiveSettings.maximumThreads > 0)
+  {
+    gmshArguments << "-nt"
+      << QString::number(effectiveSettings.maximumThreads);
   }
 
   QProcess gmsh;
@@ -920,24 +1472,36 @@ int main(int argc, char* argv[])
     return fail(jobId, "MESH_WORKER_LOST", "generating-volume",
       QString("Gmsh did not start: %1").arg(gmsh.errorString()));
   }
-  QElapsedTimer gmshDeadline;
-  gmshDeadline.start();
+  sendProgress(jobId, "generating-volume", 35, telemetry, &gmsh);
+  if (const auto limited = checkResourceLimits(&gmsh, "generating-volume"))
+  {
+    return *limited;
+  }
+  QElapsedTimer telemetryUpdate;
+  telemetryUpdate.start();
   while (gmsh.state() != QProcess::NotRunning)
   {
     if (const auto cancelled = checkCancellation(&gmsh, "generating-volume"))
     {
       return *cancelled;
     }
+    if (const auto limited = checkResourceLimits(&gmsh, "generating-volume"))
+    {
+      return *limited;
+    }
     if (gmsh.waitForFinished(25))
     {
       break;
     }
-    if (gmshDeadline.elapsed() >= 30'000)
+    if (telemetryUpdate.elapsed() >= 250)
     {
-      gmsh.kill();
-      gmsh.waitForFinished(5000);
-      return fail(jobId, "MESH_WORKER_LOST", "generating-volume",
-        "Gmsh exceeded the executable-adapter time limit");
+      sendProgress(jobId, "generating-volume", 35, telemetry, &gmsh);
+      telemetryUpdate.restart();
+      if (const auto limited =
+          checkResourceLimits(&gmsh, "generating-volume"))
+      {
+        return *limited;
+      }
     }
   }
   if (const auto cancelled = checkCancellation(&gmsh, "generating-volume"))
@@ -952,7 +1516,11 @@ int main(int argc, char* argv[])
       QString("Gmsh exit code %1; see logs/gmsh.log").arg(gmsh.exitCode()));
   }
 
-  sendProgress(jobId, "writing-result", 85);
+  sendProgress(jobId, "converting-mesh", 70, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "converting-mesh"))
+  {
+    return *limited;
+  }
   const auto counts = readMeshCounts(temporaryMeshPath, error);
   if (!counts)
   {
@@ -966,21 +1534,13 @@ int main(int argc, char* argv[])
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
 
-  const auto& region = parsedGeometryMap.regions.front();
-  const std::string solidGeometryId = region.solidGeometryId.toStdString();
-  cceda::meshing::GmshMeshMapping meshMapping;
-  meshMapping.regions.push_back({region.regionId, {solidGeometryId}});
-  for (const int tag : counts->triangleSurfaceEntityTags)
+  const auto resolvedMapping =
+    resolveGeometryMapMapping(parsedGeometryMap, *counts, error);
+  if (!resolvedMapping)
   {
-    meshMapping.entities.push_back({
-      2, tag, region.regionId, solidGeometryId,
-    });
-  }
-  for (const int tag : counts->tetrahedronVolumeEntityTags)
-  {
-    meshMapping.entities.push_back({
-      3, tag, region.regionId, solidGeometryId,
-    });
+    QFile::remove(temporaryMeshPath);
+    return fail(jobId, "MESH_TOPOLOGY_PREPARATION_FAILED",
+      "preparing-topology", error);
   }
 
   const QByteArray nativeMeshPath = QFile::encodeName(temporaryMeshPath);
@@ -1000,13 +1560,13 @@ int main(int argc, char* argv[])
         backendVersion.toStdString(),
         cceda::domain::MeshConformity::NonConformal,
       },
-      meshMapping,
+      resolvedMapping->meshMapping,
       {
         512ULL * 1024ULL * 1024ULL,
         64ULL * 1024ULL,
         10'000'000,
         40'000'000,
-        100'000,
+        MaximumMshEntityBlocks,
       });
   meshInput.close();
   if (!converted.succeeded())
@@ -1017,6 +1577,51 @@ int main(int argc, char* argv[])
         .arg(converted.line)
         .arg(QString::fromStdString(converted.detail)));
   }
+  sendProgress(jobId, "evaluating-quality", 80, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "evaluating-quality"))
+  {
+    return *limited;
+  }
+  const cceda::mesh_quality::MeshQualityEvaluationResult evaluated =
+    cceda::mesh_quality::evaluateMeshQuality(
+      *converted.mesh,
+      cceda::domain::MeshValidationMode::WorkerArtifact);
+  if (!evaluated.succeeded() || !evaluated.report->validForCommit())
+  {
+    QFile::remove(temporaryMeshPath);
+    return fail(jobId, "MESH_QUALITY_INVALID", "evaluating-quality",
+      evaluated.succeeded()
+        ? "Neutral mesh contains commit-blocking quality issues"
+        : "Neutral mesh quality evaluation rejected the mesh structure");
+  }
+  const cceda::meshing::MeshQualityJsonWriteResult qualityJson =
+    cceda::meshing::writeMeshQualityJson(*evaluated.report, jobId);
+  if (!qualityJson.succeeded()
+      || !writeByteArrayAtomically(*qualityPath, qualityJson.bytes, error))
+  {
+    QFile::remove(temporaryMeshPath);
+    QFile::remove(*qualityPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "evaluating-quality",
+      qualityJson.succeeded() ? error : qualityJson.detail);
+  }
+  const QString qualityHash = sha256(*qualityPath, error);
+  if (qualityHash.isEmpty())
+  {
+    QFile::remove(temporaryMeshPath);
+    QFile::remove(*qualityPath);
+    return fail(jobId, "MESH_OUTPUT_CORRUPT", "evaluating-quality", error);
+  }
+  if (const auto cancelled =
+      checkCancellation(nullptr, "evaluating-quality"))
+  {
+    return *cancelled;
+  }
+  sendProgress(jobId, "writing-result", 85, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "writing-result"))
+  {
+    return *limited;
+  }
+
   const cceda::meshing::MeshBinaryWriteResult encoded =
     cceda::meshing::writeMeshBinary(
       *converted.mesh,
@@ -1026,6 +1631,7 @@ int main(int argc, char* argv[])
   {
     QFile::remove(temporaryMeshPath);
     QFile::remove(*meshBinaryPath);
+    QFile::remove(*qualityPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
       encoded.succeeded()
         ? error
@@ -1037,6 +1643,7 @@ int main(int argc, char* argv[])
   {
     QFile::remove(temporaryMeshPath);
     QFile::remove(*meshBinaryPath);
+    QFile::remove(*qualityPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
   if (const auto cancelled = checkCancellation(nullptr, "writing-result"))
@@ -1047,17 +1654,11 @@ int main(int argc, char* argv[])
   {
     QFile::remove(temporaryMeshPath);
     QFile::remove(*meshBinaryPath);
+    QFile::remove(*qualityPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result",
       "Cannot publish the validated experimental mesh");
   }
 
-  QList<int> volumeTags = counts->tetrahedronVolumeEntityTags.values();
-  std::sort(volumeTags.begin(), volumeTags.end());
-  QJsonArray serializedVolumeTags;
-  for (const int tag : volumeTags)
-  {
-    serializedVolumeTags.append(tag);
-  }
   const QJsonObject geometryMapResult{
     {"schema", QJsonObject{
       {"name", "cceda.geometry-map-result"},
@@ -1067,15 +1668,12 @@ int main(int argc, char* argv[])
     {"jobId", jobId},
     {"sourceGeometryRevision", geometryRevision},
     {"mode", "independent-solids"},
-    {"regions", QJsonArray{QJsonObject{
-      {"regionId", static_cast<qint64>(region.regionId)},
-      {"sourceSolidGeometryId", region.solidGeometryId},
-      {"gmshVolumeEntityTags", serializedVolumeTags},
-    }}},
+    {"regions", resolvedMapping->serializedRegions},
   };
   if (!writeJsonAtomically(geometryMapResultPath, geometryMapResult, error))
   {
     QFile::remove(*meshBinaryPath);
+    QFile::remove(*qualityPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
@@ -1083,11 +1681,33 @@ int main(int argc, char* argv[])
   if (geometryMapResultHash.isEmpty())
   {
     QFile::remove(geometryMapResultPath);
+    QFile::remove(*qualityPath);
     QFile::remove(*meshBinaryPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
   }
 
+  const QJsonObject effectiveSettingsJson{
+    {"minimumSizeMm", effectiveSettings.minimumSizeMm},
+    {"maximumSizeMm", effectiveSettings.maximumSizeMm},
+    {"curvatureElementsPerCircle",
+      static_cast<qint64>(effectiveSettings.curvatureElementsPerCircle)},
+    {"optimizeTetrahedra", effectiveSettings.optimizeTetrahedra},
+    {"maximumThreads", static_cast<qint64>(effectiveSettings.maximumThreads)},
+    {"algorithm", meshAlgorithmId(effectiveSettings.algorithm)},
+  };
+  const QJsonObject effectiveResourceLimitsJson{
+    {"maximumElapsedMilliseconds",
+      static_cast<qint64>(effectiveResourceLimits.maximumElapsedMilliseconds)},
+    {"maximumWorkingSetBytes",
+      static_cast<qint64>(effectiveResourceLimits.maximumWorkingSetBytes)},
+  };
+  sendProgress(jobId, "completed", 100, telemetry);
+  if (const auto limited = checkResourceLimits(nullptr, "completed"))
+  {
+    return *limited;
+  }
+  const QJsonObject statistics = telemetry.statistics();
   QJsonObject result{
     {"experimental", true},
     {"format", "gmsh-msh-4.1-intermediate"},
@@ -1099,6 +1719,11 @@ int main(int argc, char* argv[])
     {"meshSha256", meshHash},
     {"meshBinaryPath", output.value("meshBinaryPath").toString()},
     {"meshBinarySha256", meshBinaryHash},
+    {"qualityPath", output.value("qualityPath").toString()},
+    {"qualitySha256", qualityHash},
+    {"effectiveSettings", effectiveSettingsJson},
+    {"effectiveResourceLimits", effectiveResourceLimitsJson},
+    {"statistics", statistics},
     {"counts", QJsonObject{
       {"nodes", counts->nodes},
       {"elements", counts->elements},
@@ -1112,6 +1737,7 @@ int main(int argc, char* argv[])
   if (!writeJsonAtomically(*resultPath, result, error))
   {
     QFile::remove(geometryMapResultPath);
+    QFile::remove(*qualityPath);
     QFile::remove(*meshBinaryPath);
     QFile::remove(*meshPath);
     return fail(jobId, "MESH_OUTPUT_CORRUPT", "writing-result", error);
@@ -1121,7 +1747,6 @@ int main(int argc, char* argv[])
     return *cancelled;
   }
 
-  sendProgress(jobId, "completed", 100);
   QJsonObject successPayload{
     {"status", "experimental-success"},
     {"sourceGeometryRevision", geometryRevision},
@@ -1131,6 +1756,10 @@ int main(int argc, char* argv[])
     {"tetrahedronCount", counts->tetrahedra},
     {"meshSha256", meshHash},
     {"meshBinarySha256", meshBinaryHash},
+    {"qualitySha256", qualityHash},
+    {"effectiveSettings", effectiveSettingsJson},
+    {"effectiveResourceLimits", effectiveResourceLimitsJson},
+    {"statistics", statistics},
   };
   if (!geometryMapResultHash.isEmpty())
   {

@@ -12,7 +12,7 @@
 namespace cceda::geometry
 {
 inline constexpr int GeometryMapSchemaMajor = 0;
-inline constexpr int GeometryMapSchemaMinor = 1;
+inline constexpr int GeometryMapSchemaMinor = 2;
 
 struct GeometrySnapshotRequest
 {
@@ -30,6 +30,7 @@ struct GeometrySnapshotRegion
   std::string solidGeometryId;
   std::vector<std::string> faceGeometryIds;
   std::array<double, 16> brepLocation{};
+  std::array<double, 6> brepBoundsMm{};
 };
 
 struct GeometrySnapshotExclusion

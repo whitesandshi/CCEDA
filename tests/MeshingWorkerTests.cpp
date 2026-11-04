@@ -3,16 +3,24 @@
 #include "geometry/OccGeometrySnapshotService.h"
 #include "meshing/GmshExecutableJobWorkspace.h"
 #include "meshing/MeshBinaryCodec.h"
+#include "meshing/MeshQualityJson.h"
 
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
+#include <IFSelect_ReturnStatus.hxx>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
 #include <QTemporaryDir>
+#include <STEPControl_Writer.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp_Pnt.hxx>
 
 #include <algorithm>
 #include <iostream>
@@ -74,7 +82,26 @@ QJsonObject parseMessage(const QByteArray& line)
         : QJsonObject{};
 }
 
-bool writeRequest(const QString& workspace, const QString& sourceStep)
+bool writeTwoSolidStep(const QString& path)
+{
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    builder.Add(compound, BRepPrimAPI_MakeBox(
+        gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0).Solid());
+    builder.Add(compound, BRepPrimAPI_MakeBox(
+        gp_Pnt(3.0, 0.0, 0.0), 1.0, 1.0, 1.0).Solid());
+    STEPControl_Writer writer;
+    const QByteArray nativePath = QFile::encodeName(path);
+    return writer.Transfer(compound, STEPControl_AsIs) == IFSelect_RetDone
+        && writer.Write(nativePath.constData()) == IFSelect_RetDone;
+}
+
+bool writeRequest(
+    const QString& workspace,
+    const QString& sourceStep,
+    cceda::domain::MeshingResourceLimits resourceLimits = {
+        120'000, 2ULL * 1024ULL * 1024ULL * 1024ULL})
 {
     const auto repository =
         std::make_shared<cceda::geometry::OccGeometryRepository>();
@@ -112,8 +139,9 @@ bool writeRequest(const QString& workspace, const QString& sourceStep)
         QString::fromStdString(value.geometryMapSha256),
         "worker-test-job",
         value.sourceGeometryRevision,
-        0.0,
-        0.0,
+        {0.0, 0.0, 24, true, 2,
+          cceda::domain::MeshGenerationAlgorithm::Hxt},
+        resourceLimits,
         32ULL * 1024ULL * 1024ULL,
     });
     if (!prepared.succeeded()) {
@@ -121,6 +149,187 @@ bool writeRequest(const QString& workspace, const QString& sourceStep)
                   << prepared.detail.toStdString() << '\n';
     }
     return prepared.succeeded();
+}
+
+bool rejectsTinyWorkingSetLimit(
+    const QString& workerPath,
+    const QString& gmshPath,
+    const QString& sourceStep)
+{
+    QTemporaryDir workspace(QDir::current().filePath(
+        "cceda-worker-resource-limit-XXXXXX"));
+    if (!workspace.isValid()
+        || !writeRequest(workspace.path(), sourceStep, {0, 1})) {
+        return false;
+    }
+
+    const QJsonObject ack{
+        {"type", "helloAck"},
+        {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
+        {"messageId", "resource-limit-main"},
+        {"jobId", "worker-test-job"},
+        {"timestampUtc", "2026-07-26T00:00:00.000Z"},
+        {"payload", QJsonObject{
+            {"workspace", QDir::cleanPath(workspace.path())},
+            {"mainBuildId", "worker-test"},
+        }},
+    };
+    const QDir root(workspace.path());
+    const QString inputPath = root.filePath("resource-limit-input.ndjson");
+    const QString outputPath = root.filePath("resource-limit-output.ndjson");
+    QFile input(inputPath);
+    const QByteArray ackLine =
+        QJsonDocument(ack).toJson(QJsonDocument::Compact) + '\n';
+    if (!input.open(QIODevice::WriteOnly)
+        || input.write(ackLine) != ackLine.size()) {
+        return false;
+    }
+    input.close();
+
+    QProcess worker;
+    worker.setStandardInputFile(inputPath);
+    worker.setStandardOutputFile(outputPath);
+    worker.start(workerPath,
+        {"--workspace", workspace.path(), "--gmsh", gmshPath});
+    if (!worker.waitForStarted(5000) || !worker.waitForFinished(10000)) {
+        worker.kill();
+        worker.waitForFinished(5000);
+        return false;
+    }
+
+    QFile output(outputPath);
+    if (!output.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    bool resourceLimitReported = false;
+    while (!output.atEnd()) {
+        const QJsonObject message = parseMessage(output.readLine());
+        resourceLimitReported = resourceLimitReported
+            || (message.value("type").toString() == "error"
+                && message.value("payload").toObject().value("code").toString()
+                    == "MESH_RESOURCE_LIMIT");
+    }
+    const bool passed = worker.exitCode() != 0 && resourceLimitReported
+        && !QFileInfo::exists(root.filePath("output/result.json"))
+        && !QFileInfo::exists(root.filePath("output/result.meshbin"))
+        && !QFileInfo::exists(root.filePath("output/gmsh-intermediate.msh"));
+    if (!passed) {
+        output.seek(0);
+        std::cerr << "Resource-limit Worker exit=" << worker.exitCode()
+                  << " reported=" << resourceLimitReported
+                  << " result="
+                  << QFileInfo::exists(root.filePath("output/result.json"))
+                  << " meshbin="
+                  << QFileInfo::exists(root.filePath("output/result.meshbin"))
+                  << " msh="
+                  << QFileInfo::exists(root.filePath("output/gmsh-intermediate.msh"))
+                  << " messages=" << output.readAll().toStdString() << '\n';
+    }
+    return passed;
+}
+
+bool multiRegionWorkerPublishesEverySolid(
+    const QString& workerPath,
+    const QString& gmshPath)
+{
+    QTemporaryDir source(QDir::current().filePath(
+        "cceda-worker-multi-source-XXXXXX"));
+    QTemporaryDir workspace(QDir::current().filePath(
+        "cceda-worker-multi-job-XXXXXX"));
+    const QString stepPath = QDir(source.path()).filePath("two-solids.step");
+    if (!source.isValid() || !workspace.isValid()
+        || !writeTwoSolidStep(stepPath)
+        || !writeRequest(workspace.path(), stepPath)) {
+        return false;
+    }
+
+    const QJsonObject ack{
+        {"type", "helloAck"},
+        {"protocol", QJsonObject{{"major", 0}, {"minor", 1}}},
+        {"messageId", "multi-region-main"},
+        {"jobId", "worker-test-job"},
+        {"timestampUtc", "2026-07-29T00:00:00.000Z"},
+        {"payload", QJsonObject{
+            {"workspace", QDir::cleanPath(workspace.path())},
+            {"mainBuildId", "worker-test"},
+        }},
+    };
+    const QDir root(workspace.path());
+    const QString inputPath = root.filePath("multi-region-input.ndjson");
+    const QString outputPath = root.filePath("multi-region-output.ndjson");
+    const QString errorPath = root.filePath("multi-region-error.log");
+    QFile input(inputPath);
+    const QByteArray ackLine =
+        QJsonDocument(ack).toJson(QJsonDocument::Compact) + '\n';
+    if (!input.open(QIODevice::WriteOnly)
+        || input.write(ackLine) != ackLine.size()) {
+        return false;
+    }
+    input.close();
+
+    QProcess worker;
+    worker.setStandardInputFile(inputPath);
+    worker.setStandardOutputFile(outputPath);
+    worker.setStandardErrorFile(errorPath);
+    worker.start(workerPath,
+        {"--workspace", workspace.path(), "--gmsh", gmshPath});
+    if (!worker.waitForStarted(5000) || !worker.waitForFinished(30000)
+        || worker.exitStatus() != QProcess::NormalExit
+        || worker.exitCode() != 0) {
+        worker.kill();
+        worker.waitForFinished(5000);
+        QFile output(outputPath);
+        output.open(QIODevice::ReadOnly);
+        std::cerr << "Multi-region Worker failed: "
+                  << output.readAll().toStdString() << '\n';
+        return false;
+    }
+
+    QFile mapResult(root.filePath("output/geometry-map-result.json"));
+    if (!mapResult.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QJsonArray mappedRegions =
+        QJsonDocument::fromJson(mapResult.readAll()).object()
+            .value("regions").toArray();
+    QHash<quint64, QString> expectedSolids;
+    for (const QJsonValue& value : mappedRegions) {
+        const QJsonObject region = value.toObject();
+        const auto regionId = static_cast<quint64>(
+            region.value("regionId").toInteger());
+        const QString solidId =
+            region.value("sourceSolidGeometryId").toString();
+        if (regionId == 0 || solidId.isEmpty()
+            || region.value("gmshVolumeEntityTags").toArray().isEmpty()
+            || expectedSolids.contains(regionId)) {
+            return false;
+        }
+        expectedSolids.insert(regionId, solidId);
+    }
+
+    QFile meshBinary(root.filePath("output/result.meshbin"));
+    if (mappedRegions.size() != 2
+        || !meshBinary.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray bytes = meshBinary.readAll();
+    const auto* begin = reinterpret_cast<const std::uint8_t*>(bytes.constData());
+    const auto decoded = cceda::meshing::readMeshBinary(
+        std::vector<std::uint8_t>(begin, begin + bytes.size()),
+        cceda::domain::MeshValidationMode::WorkerArtifact);
+    return decoded.succeeded()
+        && decoded.mesh->regions.size() == 2
+        && std::all_of(decoded.mesh->regions.begin(), decoded.mesh->regions.end(),
+            [&](const cceda::domain::MeshRegion& region) {
+                return region.sourceGeometryIds.size() == 1
+                    && expectedSolids.value(region.id).toStdString()
+                        == region.sourceGeometryIds.front();
+            })
+        && std::all_of(decoded.mesh->elements.begin(), decoded.mesh->elements.end(),
+            [&](const cceda::domain::MeshElement& element) {
+                return expectedSolids.value(element.regionId).toStdString()
+                    == element.geometryId;
+            });
 }
 
 bool rejectsLegacyStepRequest(
@@ -230,6 +439,14 @@ int main(int argc, char* argv[])
     const QString stepPath = QDir::cleanPath(QString::fromLocal8Bit(argv[3]));
     if (!expect(rejectsLegacyStepRequest(workerPath, gmshPath, stepPath),
                 "Worker did not reject the removed STEP request shape")) {
+        return 1;
+    }
+    if (!expect(rejectsTinyWorkingSetLimit(workerPath, gmshPath, stepPath),
+                "Worker did not enforce the configured working-set limit")) {
+        return 1;
+    }
+    if (!expect(multiRegionWorkerPublishesEverySolid(workerPath, gmshPath),
+                "Worker did not publish every independent-Solid region")) {
         return 1;
     }
     TestWorkspace workspace;
@@ -346,24 +563,42 @@ int main(int argc, char* argv[])
     const QJsonObject hello = parseMessage(controlOutput.readLine());
     if (!expect(hello.value("type").toString() == "hello", "first message must be hello")
         || !expect(hello.value("payload").toObject().value("backendId").toString() == "gmsh",
-                   "hello must identify Gmsh")) {
+                   "hello must identify Gmsh")
+        || !expect(hello.value("payload").toObject().value("capabilities").toObject()
+                       .value("optimization").toBool(),
+                   "hello must advertise the implemented optimization capability")) {
         return 1;
     }
 
     bool completed = false;
     bool succeeded = false;
+    bool progressTelemetryValid = true;
+    qint64 lastElapsedMilliseconds = -1;
+    qint64 maximumWorkingSetBytes = 0;
     QJsonObject successPayload;
     while (controlOutput.canReadLine()) {
         const QJsonObject message = parseMessage(controlOutput.readLine());
+        const QJsonObject payload = message.value("payload").toObject();
+        if (message.value("type").toString() == "progress") {
+            const qint64 elapsed = payload.value("elapsedMilliseconds").toInteger(-1);
+            const qint64 workingSet = payload.value("workingSetBytes").toInteger(-1);
+            progressTelemetryValid = progressTelemetryValid
+                && elapsed >= lastElapsedMilliseconds && workingSet > 0;
+            lastElapsedMilliseconds = elapsed;
+            maximumWorkingSetBytes = std::max(maximumWorkingSetBytes, workingSet);
+        }
         completed = completed
             || (message.value("type").toString() == "progress"
-                && message.value("payload").toObject().value("stage").toString() == "completed");
+                && payload.value("stage").toString() == "completed");
         if (message.value("type").toString() == "result") {
             succeeded = true;
-            successPayload = message.value("payload").toObject();
+            successPayload = payload;
         }
     }
-    if (!expect(completed && succeeded, "Worker must report completed and result")) {
+    if (!expect(completed && succeeded, "Worker must report completed and result")
+        || !expect(progressTelemetryValid && lastElapsedMilliseconds >= 0
+                && maximumWorkingSetBytes > 0,
+                   "Worker progress must expose monotonic elapsed and working-set telemetry")) {
         return 1;
     }
 
@@ -373,6 +608,13 @@ int main(int argc, char* argv[])
     }
     const QJsonObject result = QJsonDocument::fromJson(resultFile.readAll()).object();
     const QJsonObject counts = result.value("counts").toObject();
+    const QJsonObject effectiveSettings =
+        result.value("effectiveSettings").toObject();
+    const QJsonObject effectiveResourceLimits =
+        result.value("effectiveResourceLimits").toObject();
+    const QJsonObject statistics = result.value("statistics").toObject();
+    const QJsonObject controlStatistics =
+        successPayload.value("statistics").toObject();
     const QString meshPath = root.filePath("output/gmsh-intermediate.msh");
     const QString meshBinaryPath = root.filePath("output/result.meshbin");
     if (!expect(result.value("experimental").toBool(), "intermediate result must be marked experimental")
@@ -380,6 +622,23 @@ int main(int argc, char* argv[])
                    "intermediate format is not explicit")
         || !expect(result.value("sourceGeometryRevision").toInteger() == 1,
                    "geometry revision must round-trip")
+        || !expect(effectiveSettings.value("curvatureElementsPerCircle").toInt() == 24
+                && effectiveSettings.value("optimizeTetrahedra").toBool()
+                && effectiveSettings.value("maximumThreads").toInt() == 2
+                && effectiveSettings.value("algorithm").toString() == "hxt",
+                   "result must record the effective typed advanced settings")
+        || !expect(effectiveResourceLimits.value("maximumElapsedMilliseconds")
+                        .toInteger() == 120'000
+                && effectiveResourceLimits.value("maximumWorkingSetBytes")
+                        .toInteger() == 2LL * 1024LL * 1024LL * 1024LL
+                && successPayload.value("effectiveResourceLimits").toObject()
+                    == effectiveResourceLimits,
+                   "result must record the effective resource limits")
+        || !expect(statistics.value("elapsedMilliseconds").toInteger(-1) >= 0
+                && statistics.value("peakWorkingSetBytes").toInteger(-1)
+                    >= maximumWorkingSetBytes
+                && controlStatistics == statistics,
+                   "manifest and control result must agree on terminal resource telemetry")
         || !expect(QFileInfo::exists(meshPath), "validated intermediate mesh is missing")
         || !expect(result.value("meshSha256").toString() == sha256(meshPath),
                    "intermediate mesh hash does not match result")
@@ -391,11 +650,34 @@ int main(int argc, char* argv[])
         || !expect(successPayload.value("meshBinarySha256").toString()
                        == result.value("meshBinarySha256").toString(),
                    "control result and manifest neutral mesh hashes differ")
+        || !expect(QFileInfo::exists(root.filePath("output/quality.json")),
+                   "quality result is missing")
+        || !expect(result.value("qualityPath").toString()
+                       == "output/quality.json",
+                   "quality path does not match the workspace contract")
+        || !expect(result.value("qualitySha256").toString()
+                       == sha256(root.filePath("output/quality.json")),
+                   "quality hash does not match result")
+        || !expect(successPayload.value("qualitySha256").toString()
+                       == result.value("qualitySha256").toString(),
+                   "control result and manifest quality hashes differ")
         || !expect(!QFileInfo::exists(root.filePath("output/gmsh-intermediate.tmp.msh")),
                    "temporary mesh was not atomically published")
         || !expect(counts.value("nodes").toInteger() > 0, "mesh has no nodes")
         || !expect(counts.value("triangles").toInteger() > 0, "mesh has no Triangle3")
         || !expect(counts.value("tetrahedra").toInteger() > 0, "mesh has no Tetrahedron4")) {
+        return 1;
+    }
+
+    QFile qualityFile(root.filePath("output/quality.json"));
+    if (!expect(qualityFile.open(QIODevice::ReadOnly),
+                "quality result cannot be opened")) {
+        return 1;
+    }
+    const auto quality = cceda::meshing::readMeshQualityJson(qualityFile);
+    if (!expect(quality.succeeded(), "quality result is not valid protocol JSON")
+        || !expect(quality.artifact->jobId == "worker-test-job",
+                   "quality result job identity does not match")) {
         return 1;
     }
 

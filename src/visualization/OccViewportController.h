@@ -4,6 +4,7 @@
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_Triangulation.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <V3d_View.hxx>
@@ -31,6 +32,18 @@ public:
   void resize() override;
   void redraw() override;
   void displayCurrentGeometry() override;
+  [[nodiscard]] PreparedMeshPresentationPtr prepareMeshPresentation(
+    const domain::MeshModel& mesh,
+    const std::vector<domain::MeshElementId>& locatableElementIds) const override;
+  [[nodiscard]] bool displayMeshPresentation(
+    const PreparedMeshPresentationPtr& presentation) override;
+  void clearMeshPresentation() override;
+  void setMeshVisible(bool visible) override;
+  [[nodiscard]] bool setIssueElementsOnly(
+    domain::MeshRevision meshRevision, bool enabled) override;
+  [[nodiscard]] bool highlightMeshElement(
+    domain::MeshRevision meshRevision,
+    domain::MeshElementId elementId) override;
   void fitAll() override;
   void setIsometric() override;
   void highlight(std::string_view geometryId) override;
@@ -41,6 +54,7 @@ public:
 
 private:
   [[nodiscard]] bool ready() const noexcept;
+  void setGeometryVisible(bool visible);
 
   std::shared_ptr<geometry::OccGeometryRepository> repository_;
   occ::handle<Aspect_DisplayConnection> displayConnection_;
@@ -50,5 +64,11 @@ private:
   occ::handle<WNT_Window> window_;
   occ::handle<AIS_InteractiveContext> context_;
   std::unordered_map<std::string, occ::handle<AIS_Shape>> presentations_;
+  occ::handle<AIS_Triangulation> meshPresentation_;
+  occ::handle<AIS_Triangulation> meshIssuesPresentation_;
+  occ::handle<AIS_Triangulation> meshElementHighlight_;
+  PreparedMeshPresentationPtr displayedMeshPresentation_;
+  bool meshVisible_ = false;
+  bool issueElementsOnly_ = false;
 };
 }

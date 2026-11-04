@@ -49,7 +49,7 @@ QByteArray validGeometryMap(qint64 revision)
   }
   return QJsonDocument(QJsonObject{
     {"schema", QJsonObject{{"name", "cceda.geometry-map"},
-      {"major", 0}, {"minor", 1}}},
+      {"major", 0}, {"minor", 2}}},
     {"sourceGeometryRevision", revision},
     {"mode", "independent-solids"},
     {"canonicalUnit", "mm"},
@@ -61,6 +61,7 @@ QByteArray validGeometryMap(qint64 revision)
       {"sourcePartGeometryId", "part-1"},
       {"sourceSolidGeometryId", "solid-1"},
       {"sourceFaceGeometryIds", QJsonArray{"face-1"}},
+      {"brepBoundsMm", QJsonArray{0.0, 0.0, 0.0, 1.0, 1.0, 1.0}},
       {"brepLocation", QJsonObject{
         {"transformsBaked", false},
         {"matrixRowMajor", matrix},
@@ -93,8 +94,18 @@ int main()
     sha256(mapBytes),
     "snapshot-job",
     42,
-    0.2,
-    3.0,
+    {
+      0.2,
+      3.0,
+      24,
+      true,
+      6,
+      cceda::domain::MeshGenerationAlgorithm::Hxt,
+    },
+    {
+      90'000,
+      2ULL * 1024ULL * 1024ULL * 1024ULL,
+    },
     16 * 1024,
   };
   const GmshJobWorkspaceResult snapshot =
@@ -111,6 +122,8 @@ int main()
     expect(snapshot.job->geometryMapSha256
         == snapshotRequest.expectedGeometryMapSha256,
       "map digest remains bound to snapshot metadata");
+    expect(snapshot.job->qualityPath.endsWith("output/quality.json"),
+      "quality output uses the fixed protocol path");
 
     QFile requestFile(snapshot.job->requestPath);
     expect(requestFile.open(QIODevice::ReadOnly),
@@ -127,7 +140,35 @@ int main()
     expect(geometry.value("map").toObject().value("sha256").toString()
         == snapshotRequest.expectedGeometryMapSha256,
       "request seals the geometry-map digest");
+    expect(json.value("output").toObject().value("qualityPath").toString()
+        == "output/quality.json",
+      "request seals the quality output path");
+    const QJsonObject settings = json.value("settings").toObject();
+    expect(settings.value("minimumSizeMm").toDouble() == 0.2
+        && settings.value("maximumSizeMm").toDouble() == 3.0
+        && settings.value("curvatureElementsPerCircle").toInt() == 24
+        && settings.value("optimizeTetrahedra").toBool()
+        && settings.value("maximumThreads").toInt() == 6
+        && settings.value("algorithm").toString() == "hxt",
+      "request seals the complete typed meshing settings");
+    const QJsonObject resourceLimits =
+      json.value("resourceLimits").toObject();
+    expect(resourceLimits.value("maximumElapsedMilliseconds").toInteger()
+          == 90'000
+        && resourceLimits.value("maximumWorkingSetBytes").toInteger()
+          == 2LL * 1024LL * 1024LL * 1024LL,
+      "request seals the typed resource limits");
   }
+
+  auto invalidResourceLimit = snapshotRequest;
+  invalidResourceLimit.workspace =
+    QDir(snapshotRoot.path()).filePath("invalid-resource-limit");
+  invalidResourceLimit.resourceLimits.maximumElapsedMilliseconds =
+    cceda::domain::MaximumMeshingElapsedMilliseconds + 1;
+  const GmshJobWorkspaceResult resourceLimitRejected =
+    prepareGmshSnapshotJobWorkspace(invalidResourceLimit);
+  expect(resourceLimitRejected.error == GmshJobWorkspaceErrorCode::InvalidRequest,
+    "out-of-range resource limits are rejected before request publication");
 
   auto mismatchedHash = snapshotRequest;
   mismatchedHash.workspace = QDir(snapshotRoot.path()).filePath("hash-mismatch");
@@ -182,15 +223,23 @@ int main()
 
   auto invalidRequest = snapshotRequest;
   invalidRequest.workspace = QDir(snapshotRoot.path()).filePath("invalid-settings");
-  invalidRequest.minimumSizeMm = 3.0;
-  invalidRequest.maximumSizeMm = 2.0;
+  invalidRequest.settings.minimumSizeMm = 3.0;
+  invalidRequest.settings.maximumSizeMm = 2.0;
   const GmshJobWorkspaceResult invalid =
     prepareGmshSnapshotJobWorkspace(invalidRequest);
   expect(invalid.error == GmshJobWorkspaceErrorCode::InvalidRequest,
     "an inverted size range is rejected");
 
-  invalidRequest.minimumSizeMm = 0.0;
-  invalidRequest.maximumSizeMm = 0.0;
+  invalidRequest = snapshotRequest;
+  invalidRequest.workspace = QDir(snapshotRoot.path()).filePath("invalid-algorithm");
+  invalidRequest.settings.algorithm =
+    static_cast<cceda::domain::MeshGenerationAlgorithm>(255);
+  const GmshJobWorkspaceResult invalidAlgorithm =
+    prepareGmshSnapshotJobWorkspace(invalidRequest);
+  expect(invalidAlgorithm.error == GmshJobWorkspaceErrorCode::InvalidRequest,
+    "an algorithm outside the typed whitelist is rejected");
+
+  invalidRequest.settings = {};
   invalidRequest.jobId = "invalid job\n";
   const GmshJobWorkspaceResult invalidJobId =
     prepareGmshSnapshotJobWorkspace(invalidRequest);

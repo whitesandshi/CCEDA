@@ -7,3 +7,6 @@
 *.opendb
 *.log
 *.tmp
+
+# Local STEP model fixtures (large, machine-specific)
+src/model/

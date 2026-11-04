@@ -12,7 +12,7 @@
 namespace cceda::meshing
 {
 inline constexpr int GeometryMapSchemaMajor = 0;
-inline constexpr int GeometryMapSchemaMinor = 1;
+inline constexpr int GeometryMapSchemaMinor = 2;
 
 struct GeometryMapRegion
 {
@@ -23,6 +23,7 @@ struct GeometryMapRegion
   QString solidGeometryId;
   QStringList faceGeometryIds;
   std::array<double, 16> brepLocation{};
+  std::array<double, 6> brepBoundsMm{};
 };
 
 struct GeometryMapSharedFaceCandidate

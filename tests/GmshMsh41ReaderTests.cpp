@@ -53,6 +53,31 @@ $EndElements
 )msh";
 }
 
+std::string manyBlockMsh(int nodeBlocks, int elementBlocks)
+{
+  std::ostringstream text;
+  text << "$MeshFormat\n4.1 0 8\n$EndMeshFormat\n"
+       << "$Entities\n0 0 0 0\n$EndEntities\n"
+       << "$Nodes\n" << nodeBlocks << ' ' << nodeBlocks << " 1 "
+       << nodeBlocks << '\n';
+  for (int tag = 1; tag <= nodeBlocks; ++tag)
+  {
+    text << "2 1 0 1\n" << tag << "\n0 0 0\n";
+  }
+  text << "$EndNodes\n"
+       << "$Elements\n" << elementBlocks << ' ' << elementBlocks << " 1 "
+       << elementBlocks << '\n';
+  const int pointBlocks = elementBlocks - 2;
+  for (int tag = 1; tag <= pointBlocks; ++tag)
+  {
+    text << "0 " << tag << " 15 1\n" << tag << " 1\n";
+  }
+  text << "2 20 2 1\n" << elementBlocks - 1 << " 1 2 3\n";
+  text << "3 30 4 1\n" << elementBlocks << " 1 2 3 4\n";
+  text << "$EndElements\n";
+  return text.str();
+}
+
 cceda::meshing::GmshMeshMetadata metadata()
 {
   return {
@@ -192,6 +217,35 @@ int main()
   expect(read(binary, mapping(), limits()).error
       == GmshMsh41ErrorCode::UnsupportedFormat,
     "binary or non-4.1 input is rejected");
+
+  meshing::GmshMsh41ReadLimits blockBudget = limits();
+  blockBudget.maximumInputBytes = 4 * 1024 * 1024;
+  blockBudget.maximumNodes = 1000;
+  blockBudget.maximumElements = 1000;
+  blockBudget.maximumEntityBlocks = 100;
+  const meshing::GmshMsh41ReadResult rejectedNodeBlocks =
+    read(manyBlockMsh(120, 120), mapping(), blockBudget);
+  expect(rejectedNodeBlocks.error == GmshMsh41ErrorCode::CountLimitExceeded
+      && rejectedNodeBlocks.detail.find("$Nodes") != std::string::npos,
+    "entity block counts above the caller budget are rejected at $Nodes");
+
+  meshing::GmshMsh41ReadLimits elementBlockBudget = blockBudget;
+  elementBlockBudget.maximumEntityBlocks = 120;
+  const meshing::GmshMsh41ReadResult rejectedElementBlocks =
+    read(manyBlockMsh(120, 130), mapping(), elementBlockBudget);
+  expect(rejectedElementBlocks.error == GmshMsh41ErrorCode::CountLimitExceeded
+      && rejectedElementBlocks.detail.find("$Elements") != std::string::npos,
+    "entity block counts above the caller budget are rejected at $Elements");
+
+  meshing::GmshMsh41ReadLimits acceptedBlockBudget = blockBudget;
+  acceptedBlockBudget.maximumEntityBlocks = 150;
+  const meshing::GmshMsh41ReadResult convertedBlocks =
+    read(manyBlockMsh(120, 120), mapping(), acceptedBlockBudget);
+  expect(convertedBlocks.succeeded()
+      && convertedBlocks.mesh
+      && convertedBlocks.mesh->nodes.size() == 120
+      && convertedBlocks.mesh->elements.size() == 2,
+    "entity block counts within the caller budget are converted");
 
   if (failures == 0)
   {
