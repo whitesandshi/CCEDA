@@ -44,7 +44,9 @@ target_include_directories(cceda_domain PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
 
 add_library(cceda_mesh_quality STATIC
     src/mesh_quality/MeshQuality.cpp
-    src/mesh_quality/MeshQuality.h)
+    src/mesh_quality/MeshQuality.h
+    src/mesh_quality/MeshQualityColoring.cpp
+    src/mesh_quality/MeshQualityColoring.h)
 target_include_directories(cceda_mesh_quality
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_quality PUBLIC cceda_domain)
@@ -383,6 +385,12 @@ if(BUILD_TESTING)
     target_link_libraries(cceda_mesh_quality_tests PRIVATE
         cceda_mesh_quality)
     add_test(NAME mesh.quality COMMAND cceda_mesh_quality_tests)
+
+    add_executable(cceda_mesh_quality_coloring_tests
+        tests/MeshQualityColoringTests.cpp)
+    target_link_libraries(cceda_mesh_quality_coloring_tests PRIVATE
+        cceda_mesh_quality)
+    add_test(NAME mesh.quality_coloring COMMAND cceda_mesh_quality_coloring_tests)
 
     add_executable(cceda_mesh_quality_json_tests
         tests/MeshQualityJsonTests.cpp)

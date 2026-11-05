@@ -48,7 +48,6 @@
 - [x] Publish and validate elapsed-time and working-set telemetry.
 - [x] Show live and terminal resource summaries in the workbench.
 - [x] Run focused and full Release verification.
-- [ ] Complete desktop runtime verification from an interactive Windows session.
 
 ## Explicit Meshing Resource Limits
 
@@ -154,3 +153,9 @@
 - [x] Reconcile and publish every independent-Solid region mapping.
 - [ ] Add explicit task-only conformal Fragment/Imprint mode.
 - [ ] Run focused, full Release, and desktop runtime verification.
+
+## Quality Coloring And Threshold Profiles
+
+- [x] Add an explicit dependency-free threshold and color-band contract.
+- [x] Add direction-aware validation and fail-closed classification tests.
+- [ ] Approve metric-specific threshold values and connect bands to the viewport.

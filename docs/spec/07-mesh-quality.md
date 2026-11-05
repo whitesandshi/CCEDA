@@ -14,6 +14,12 @@ Version 0.1 computes per-element metrics and geometric validity issues.
 Threshold profiles, percentile summaries, optimization policy, and UI
 color maps remain later contracts.
 
+The first quality-coloring slice defines the dependency-free policy boundary
+without selecting product thresholds. A caller supplies a named
+`MeshQualityThresholdProfile` with finite, direction-aware warning and
+critical boundaries. The evaluator remains unchanged and never reads this
+policy implicitly.
+
 ## 2. Evaluation Contract
 
 - Callers supply the expected `MeshValidationMode`; the input MUST first pass
@@ -241,3 +247,24 @@ snapshot only with issue-bounded element details.
 - This filter is distinct from quality coloring: metric thresholds, color
   direction, and color maps remain later contracts. Worker protocol `0.1`
   remains unchanged.
+
+## 12. Quality Coloring Policy Boundary
+
+- A threshold profile MUST have a non-empty stable caller-supplied ID.
+- Each metric MAY occur at most once in a profile. Unknown metric identifiers,
+  non-finite boundaries, and directionally reversed boundaries MUST invalidate
+  the profile.
+- For higher-is-better metrics, values at or above the warning boundary are
+  `Good`, values between the critical and warning boundaries are `Warning`,
+  and values below the critical boundary are `Critical`.
+- For lower-is-better metrics, values at or below the warning boundary are
+  `Good`, values between the warning and critical boundaries are `Warning`,
+  and values above the critical boundary are `Critical`.
+- Positive-required metrics classify finite positive values as `Good` and all
+  other finite values as `Critical`. True-required metrics classify `true` as
+  `Good` and `false` as `Critical`.
+- Missing or non-finite metric values, and metrics without an explicit profile
+  entry, classify as `Unavailable`.
+- The profile contract does not establish approved product threshold values,
+  percentile policies, or a viewport presentation format. Those remain the
+  next integration slice.

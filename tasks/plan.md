@@ -213,6 +213,8 @@ recomputes. The Controller now commits a quality-valid mesh through
 ### Later Slices
 
 - [ ] Add quality coloring and approved threshold profiles.
+  - [x] Add an explicit dependency-free threshold and color-band contract.
+  - [ ] Approve metric-specific threshold values and connect bands to the viewport.
 - [ ] Persist current mesh settings, reports, and accepted quality results.
 
 ## Risks and Mitigations
