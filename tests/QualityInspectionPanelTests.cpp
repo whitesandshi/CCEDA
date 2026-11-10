@@ -3,6 +3,9 @@
 #include <QApplication>
 #include <QAbstractItemModel>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QLabel>
 #include <QTableView>
 #include <QTableWidget>
@@ -177,6 +180,45 @@ int main(int argc, char* argv[])
     "replacing quality without issues disables and clears issue-only display");
 
   panel.clearQuality();
+  auto* metric = panel.findChild<QComboBox*>("qualityColorMetric");
+  auto* warning = panel.findChild<QLineEdit*>("qualityWarningBoundary");
+  auto* critical = panel.findChild<QLineEdit*>("qualityCriticalBoundary");
+  auto* apply = panel.findChild<QPushButton*>("applyQualityColors");
+  auto* legend = panel.findChild<QLabel*>("qualityColorLegend");
+  expect(metric && warning && critical && apply && legend, "color controls exist");
+  if (!metric || !warning || !critical || !apply || !legend) { return EXIT_FAILURE; }
+  expect(!apply->isEnabled(), "empty quality cannot request colors");
+  panel.showQuality(cleanQuality);
+  panel.setColoringAvailable(true);
+  metric->setCurrentIndex(3);
+  expect(!apply->isEnabled(), "numeric coloring requires explicit thresholds");
+  warning->setText("20");
+  critical->setText("10");
+  expect(apply->isEnabled() && panel.coloringRequest().has_value(), "ordered thresholds enable coloring");
+  cceda::domain::MeshRevision coloringRevision = 0;
+  QObject::connect(&panel, &cceda::ui::QualityInspectionPanel::coloringRequested,
+    &panel, [&](auto revision) { coloringRevision = revision; });
+  apply->click();
+  expect(coloringRevision == 7, "color request carries accepted revision");
+  panel.showAppliedColoring(true);
+  expect(legend->text().contains("20") && legend->text().contains("Green"), "applied legend includes boundaries and color meaning");
+  panel.setColoringAvailable(false);
+  expect(!apply->isEnabled() && !metric->isEnabled(), "busy preparation freezes controls");
+  panel.setColoringAvailable(true);
+  critical->setText("30");
+  expect(!apply->isEnabled(), "reversed boundaries block requests");
+  critical->setText("nan");
+  expect(!apply->isEnabled(), "non-finite boundaries block requests");
+  metric->setCurrentIndex(2);
+  warning->setText("2");
+  critical->setText("5");
+  expect(apply->isEnabled(), "lower-is-better boundaries are accepted");
+  metric->setCurrentIndex(5);
+  expect(apply->isEnabled() && !warning->isEnabled(), "boolean coloring requires no numeric boundary");
+  metric->setCurrentIndex(0);
+  expect(apply->isEnabled() && !panel.coloringRequest(), "uniform display can be restored");
+  panel.clearQuality();
+  expect(!apply->isEnabled() && legend->text().isEmpty(), "clearing geometry clears coloring state");
   expect(summaries->model()->rowCount() == 0 && issues->model()->rowCount() == 0,
     "clearing quality removes stale inspection data");
   expect(details->isHidden() && details->rowCount() == 0,

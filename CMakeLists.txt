@@ -161,6 +161,7 @@ add_library(cceda_ui_widgets STATIC
     src/ui/MeshingTaskPanel.h
     src/ui/QualityInspectionPanel.cpp
     src/ui/QualityInspectionPanelPresentation.cpp
+    src/ui/QualityInspectionPanelColoring.cpp
     src/ui/QualityInspectionPanel.h)
 target_include_directories(cceda_ui_widgets
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")

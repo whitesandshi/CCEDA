@@ -1,6 +1,7 @@
 #pragma once
 
 #include "application/MeshingJobController.h"
+#include "visualization/IViewportController.h"
 
 #include <QWidget>
 
@@ -10,6 +11,10 @@ class QLabel;
 class QCheckBox;
 class QTableView;
 class QTableWidget;
+class QComboBox;
+class QLineEdit;
+class QPushButton;
+class QVBoxLayout;
 
 namespace cceda::ui
 {
@@ -25,8 +30,12 @@ public:
     std::shared_ptr<const application::AcceptedMeshQuality> quality);
   void clearQuality();
   void setIssueOnlyDisplayAvailable(bool available);
+  void setColoringAvailable(bool available);
+  void showAppliedColoring(bool succeeded);
+  [[nodiscard]] std::optional<visualization::MeshQualityColoringRequest> coloringRequest() const;
 
 signals:
+  void coloringRequested(cceda::domain::MeshRevision meshRevision);
   void issueElementSelected(
     cceda::domain::MeshRevision meshRevision,
     cceda::domain::MeshElementId elementId);
@@ -36,6 +45,8 @@ signals:
 private:
   class SummaryModel;
   class IssueModel;
+  void createColoringControls(QVBoxLayout* layout);
+  void updateColoringControls();
 
   void showIssueDetail(
     const mesh_quality::MeshQualityElementDetail* detail);
@@ -49,5 +60,11 @@ private:
   std::unique_ptr<IssueModel> issueModel_;
   domain::MeshRevision meshRevision_ = 0;
   bool hasIssues_ = false;
+  QComboBox* coloringMetric_ = nullptr;
+  QLineEdit* warningBoundary_ = nullptr;
+  QLineEdit* criticalBoundary_ = nullptr;
+  QPushButton* applyColoring_ = nullptr;
+  QLabel* coloringLegend_ = nullptr;
+  bool coloringAvailable_ = false;
 };
 }

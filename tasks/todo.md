@@ -159,4 +159,6 @@
 - [x] Add an explicit dependency-free threshold and color-band contract.
 - [x] Add direction-aware validation and fail-closed classification tests.
 - [x] Connect validated bands to the OCCT viewport preparation and display port.
-- [ ] Approve metric-specific threshold values and expose the workbench control.
+- [x] Expose surface metrics, explicit user thresholds, Apply, and the applied legend.
+- [x] Verify Release build and all 24 tests with unrestricted temporary-file access.
+- [ ] Complete desktop visual acceptance and approve preset threshold profiles.

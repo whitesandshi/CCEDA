@@ -3,6 +3,7 @@
 #include <QAbstractTableModel>
 #include <QAbstractItemView>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QSignalBlocker>
@@ -294,6 +295,7 @@ QualityInspectionPanel::QualityInspectionPanel(QWidget* parent)
   status_->setObjectName("qualityInspectionStatus");
   status_->setAccessibleName(status_->text());
   layout->addWidget(status_);
+  createColoringControls(layout);
 
   issueOnlyDisplay_ = new QCheckBox(tr("Show only issue elements"), this);
   issueOnlyDisplay_->setObjectName("qualityIssueOnlyDisplayCheckBox");
@@ -371,6 +373,9 @@ void QualityInspectionPanel::showQuality(
   summaryModel_->setQuality(quality);
   issueModel_->setQuality(quality);
   meshRevision_ = quality->meshRevision;
+  coloringMetric_->setCurrentIndex(0);
+  setColoringAvailable(false);
+  coloringLegend_->clear();
   hasIssues_ = !quality->issues.empty();
   setIssueOnlyDisplayAvailable(false);
   showIssueDetail(nullptr);
@@ -390,6 +395,9 @@ void QualityInspectionPanel::clearQuality()
   summaryModel_->setQuality({});
   issueModel_->setQuality({});
   meshRevision_ = 0;
+  coloringMetric_->setCurrentIndex(0);
+  setColoringAvailable(false);
+  coloringLegend_->clear();
   hasIssues_ = false;
   setIssueOnlyDisplayAvailable(false);
   showIssueDetail(nullptr);

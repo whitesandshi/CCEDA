@@ -138,6 +138,18 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
                  domain::MeshElementId elementId) {
             locateMeshElement(meshRevision, elementId);
           });
+  connect(qualityPanel_, &QualityInspectionPanel::coloringRequested, this,
+          [this](domain::MeshRevision revision) {
+            const auto mesh = projectState_.currentMeshHandle();
+            if (!meshingActive_ && !importWatcher_.isRunning()
+              && !meshPresentationWatcher_.isRunning()
+              && projectState_.meshState() == domain::MeshState::Ready
+              && mesh && mesh->meshRevision == revision
+              && mesh->sourceGeometryRevision == projectState_.geometryRevision())
+            {
+              prepareCurrentMeshPresentation();
+            }
+          });
   connect(qualityPanel_, &QualityInspectionPanel::issueOnlyDisplayChanged, this,
           [this](domain::MeshRevision meshRevision, bool enabled) {
             setIssueElementsOnly(meshRevision, enabled);

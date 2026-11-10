@@ -47,6 +47,7 @@ void MainWindow::startMeshing()
   snapshotCancellationRequested_ = false;
   lastMeshingStage_.clear();
   meshingActive_ = true;
+  qualityPanel_->setColoringAvailable(false);
   updateMeshExportAction();
   generateMeshAction_->setEnabled(false);
   cancelMeshAction_->setEnabled(true);
@@ -189,6 +190,9 @@ void MainWindow::prepareCurrentMeshPresentation()
   }
 
   const std::shared_ptr<const domain::MeshModel> mesh = projectState_.currentMeshHandle();
+  const auto coloring = qualityPanel_->coloringRequest();
+  qualityPanel_->setColoringAvailable(false);
+  qualityPanel_->setIssueOnlyDisplayAvailable(false);
   viewportController_->clearMeshPresentation();
   {
     const QSignalBlocker blocker(meshSurfaceAction_);
@@ -210,11 +214,11 @@ void MainWindow::prepareCurrentMeshPresentation()
   const std::vector<domain::MeshElementId> locatableElementIds =
     meshIssueElementIds_;
   meshPresentationWatcher_.setFuture(QtConcurrent::run(
-    [controller, mesh, locatableElementIds] {
+    [controller, mesh, locatableElementIds, coloring] {
       try
       {
         return controller->prepareMeshPresentation(
-          *mesh, locatableElementIds);
+          *mesh, locatableElementIds, coloring);
       }
       catch (...)
       {
@@ -292,8 +296,11 @@ void MainWindow::meshPresentationFinished()
     hasMeshableGeometry() && !meshingActive_ && !importWatcher_.isRunning());
   const visualization::PreparedMeshPresentationPtr prepared =
     meshPresentationWatcher_.result();
+  qualityPanel_->setColoringAvailable(
+    projectState_.meshState() == domain::MeshState::Ready && !importWatcher_.isRunning());
   if (prepared == nullptr)
   {
+    qualityPanel_->showAppliedColoring(false);
     statusBar()->showMessage(tr("Mesh ready; surface display unavailable"));
     appendLog(tr("Mesh surface preparation failed; the committed mesh remains valid."));
     return;
@@ -311,6 +318,7 @@ void MainWindow::meshPresentationFinished()
 
   if (!viewportController_->displayMeshPresentation(prepared))
   {
+    qualityPanel_->showAppliedColoring(false);
     statusBar()->showMessage(tr("Mesh ready; surface display unavailable"));
     appendLog(tr("The viewport rejected the prepared mesh surface."));
     return;
@@ -321,6 +329,7 @@ void MainWindow::meshPresentationFinished()
     meshSurfaceAction_->setChecked(true);
   }
   meshSurfaceAction_->setEnabled(true);
+  qualityPanel_->showAppliedColoring(true);
   qualityPanel_->setIssueOnlyDisplayAvailable(
     prepared->locatableElementCount() > 0);
   statusBar()->showMessage(tr("Mesh ready: revision %1").arg(prepared->meshRevision()));
@@ -348,6 +357,8 @@ void MainWindow::meshingCancelled(const application::MeshingJobCancellation& can
 void MainWindow::finishMeshingTask()
 {
   meshingActive_ = false;
+  qualityPanel_->setColoringAvailable(projectState_.meshState() == domain::MeshState::Ready
+    && !importWatcher_.isRunning() && !meshPresentationWatcher_.isRunning());
   snapshotCancellationRequested_ = false;
   generateMeshAction_->setEnabled(hasMeshableGeometry());
   cancelMeshAction_->setEnabled(false);

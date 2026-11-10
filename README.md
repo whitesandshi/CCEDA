@@ -29,6 +29,7 @@ CCEDA is a solver-neutral geometry and mesh preprocessing desktop application. T
 - Configure disabled-by-default wall-clock and combined-working-set limits; resource failures terminate the Worker tree, remove formal output, and preserve the current mesh.
 - Prepare committed Triangle3 surfaces off the UI thread, reject stale revision results, and show or hide the OCCT mesh presentation.
 - Inspect accepted quality summaries and exact issue records bound to the committed mesh revision.
+- Apply surface-quality colors from the Quality panel using explicit numeric thresholds or normal consistency, with background preparation and an applied legend.
 - Select a quality issue to reveal and frame its exact Triangle3 or Tetrahedron4 element in the current revision.
 - Inspect the selected issue element's ordered nodes, region, geometry association, and applicable metric values without scanning the full mesh.
 - Filter the displayed committed mesh to its accepted issue elements without applying implicit quality thresholds or colors.
@@ -91,4 +92,4 @@ The geometry adapter now creates protocol-0.2 independent-Solid snapshots from o
 
 Meshing now exposes a typed Delaunay/HXT algorithm whitelist and an opt-in automatic retry policy. Retry is disabled by default and bounded to two attempts. Only surface- or volume-generation failures switch to the alternate algorithm; later attempts preserve all other settings, start a fresh Worker in a separate workspace, retain failed-attempt diagnostics, and consume the remaining total time budget. Resource, input, topology, cancellation, Worker-loss, output, quality, stale-revision, and commit failures remain terminal.
 
-This is not yet the complete product mesh pipeline. The intermediate Worker `.msh` remains diagnostic and the executable adapter is still reported as experimental. Stable Face reconciliation, project persistence, and quality coloring remain future slices.
+This is not yet the complete product mesh pipeline. The intermediate Worker `.msh` remains diagnostic and the executable adapter is still reported as experimental. Stable Face reconciliation, project persistence, preset quality thresholds, and volume quality coloring remain future slices.

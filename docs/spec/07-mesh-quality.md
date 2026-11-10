@@ -267,6 +267,21 @@ snapshot only with issue-bounded element details.
   entry, classify as `Unavailable`.
 - The current OCCT adapter accepts a validated profile during background mesh
   presentation preparation, groups Triangle3 elements by band, and displays
-  each non-empty band as a separate surface presentation. Approved product
-  threshold values, percentile policies, and the workbench control remain
-  future contracts.
+  each non-empty band as a separate surface presentation.
+
+## 13. Workbench Surface Coloring
+
+- The Quality panel offers uniform surface display and the five Triangle3
+  metrics. Numeric coloring requires explicit finite warning and critical
+  boundaries ordered according to the metric direction. Fields start empty
+  and clear when switching metrics. Normal consistency uses its boolean rule.
+- Apply captures the selected policy and immutable committed mesh for background
+  presentation preparation. Controls are disabled during preparation. Completion
+  rechecks the current geometry and mesh revisions before displaying the result.
+- The applied legend identifies the metric, numeric boundaries, and the green,
+  amber, red, and gray band meanings. Uniform display clears the legend.
+- Replacing accepted quality resets the coloring selection. Clearing quality
+  disables coloring and clears the legend. Preparation failure allows retry
+  while the committed mesh is current.
+- Approved preset thresholds, volume metric coloring, and desktop visual
+  acceptance remain pending. Current numeric thresholds are user-supplied.
