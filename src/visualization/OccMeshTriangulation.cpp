@@ -58,10 +58,10 @@ occ::handle<Poly_Triangulation> buildElementTriangulation(
   triangulation->UpdateCachedMinMax();
   return triangulation;
 }
-}
 
-occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
-  const domain::MeshModel& mesh)
+occ::handle<Poly_Triangulation> buildOccSurfaceTriangulationImpl(
+  const domain::MeshModel& mesh,
+  const std::unordered_set<domain::MeshElementId>* selectedElements)
 {
   const domain::MeshValidationReport report =
     domain::validateMeshModel(mesh, domain::MeshValidationMode::CommittedMesh);
@@ -78,18 +78,29 @@ occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
     nodesById.emplace(node.id, &node);
   }
 
-  std::unordered_map<domain::MeshNodeId, int> surfaceNodeIndices;
-  std::vector<const domain::MeshNode*> surfaceNodes;
+  std::vector<const domain::MeshElement*> triangles;
+  triangles.reserve(static_cast<std::size_t>(report.triangleCount));
   for (const domain::MeshElement& element : mesh.elements)
   {
-    if (element.type != domain::MeshElementType::Triangle3)
+    if (element.type == domain::MeshElementType::Triangle3
+      && (selectedElements == nullptr
+        || selectedElements->find(element.id) != selectedElements->end()))
     {
-      continue;
+      triangles.push_back(&element);
     }
+  }
+  if (triangles.empty())
+  {
+    return {};
+  }
 
+  std::unordered_map<domain::MeshNodeId, int> surfaceNodeIndices;
+  std::vector<const domain::MeshNode*> surfaceNodes;
+  for (const domain::MeshElement* element : triangles)
+  {
     for (std::size_t index = 0; index < 3; ++index)
     {
-      const domain::MeshNodeId nodeId = element.nodeIds[index];
+      const domain::MeshNodeId nodeId = element->nodeIds[index];
       if (surfaceNodeIndices.find(nodeId) != surfaceNodeIndices.end())
       {
         continue;
@@ -110,14 +121,9 @@ occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
     }
   }
 
-  if (surfaceNodes.empty())
-  {
-    return {};
-  }
-
   occ::handle<Poly_Triangulation> triangulation =
     new Poly_Triangulation(static_cast<int>(surfaceNodes.size()),
-                           static_cast<int>(report.triangleCount),
+                           static_cast<int>(triangles.size()),
                            false,
                            false);
   for (std::size_t index = 0; index < surfaceNodes.size(); ++index)
@@ -127,23 +133,87 @@ occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
   }
 
   int triangleIndex = 1;
-  for (const domain::MeshElement& element : mesh.elements)
+  for (const domain::MeshElement* element : triangles)
   {
-    if (element.type != domain::MeshElementType::Triangle3)
-    {
-      continue;
-    }
-
     triangulation->SetTriangle(
       triangleIndex++,
-      Poly_Triangle(surfaceNodeIndices.at(element.nodeIds[0]),
-                    surfaceNodeIndices.at(element.nodeIds[1]),
-                    surfaceNodeIndices.at(element.nodeIds[2])));
+      Poly_Triangle(surfaceNodeIndices.at(element->nodeIds[0]),
+                    surfaceNodeIndices.at(element->nodeIds[1]),
+                    surfaceNodeIndices.at(element->nodeIds[2])));
   }
 
   triangulation->ComputeNormals();
   triangulation->UpdateCachedMinMax();
   return triangulation;
+}
+
+std::optional<double> triangleMetricValue(
+  const mesh_quality::TriangleQuality& quality,
+  mesh_quality::MeshQualityMetric metric)
+{
+  switch (metric)
+  {
+    case mesh_quality::MeshQualityMetric::TriangleArea:
+      return quality.areaSquareMillimeters;
+    case mesh_quality::MeshQualityMetric::TriangleAspectRatio:
+      return quality.aspectRatio;
+    case mesh_quality::MeshQualityMetric::TriangleMinimumAngle:
+      return quality.minimumAngleDegrees;
+    case mesh_quality::MeshQualityMetric::TriangleMaximumAngle:
+      return quality.maximumAngleDegrees;
+    case mesh_quality::MeshQualityMetric::TetrahedronSignedVolume:
+    case mesh_quality::MeshQualityMetric::TetrahedronAspectRatio:
+    case mesh_quality::MeshQualityMetric::TetrahedronMinimumDihedralAngle:
+    case mesh_quality::MeshQualityMetric::TetrahedronScaledJacobian:
+      return std::nullopt;
+    case mesh_quality::MeshQualityMetric::TriangleNormalConsistent:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+}
+
+occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
+  const domain::MeshModel& mesh)
+{
+  return buildOccSurfaceTriangulationImpl(mesh, nullptr);
+}
+
+OccQualitySurfaceTriangulations buildOccQualitySurfaceTriangulations(
+  const domain::MeshModel& mesh,
+  mesh_quality::MeshQualityMetric metric,
+  const mesh_quality::MeshQualityThresholdProfile& profile)
+{
+  OccQualitySurfaceTriangulations result{};
+  if (!mesh_quality::validateThresholdProfile(profile))
+  {
+    return result;
+  }
+
+  const mesh_quality::MeshQualityEvaluationResult evaluation =
+    mesh_quality::evaluateMeshQuality(
+      mesh, domain::MeshValidationMode::CommittedMesh);
+  if (!evaluation.report)
+  {
+    return result;
+  }
+
+  std::array<std::unordered_set<domain::MeshElementId>, 4> elementIds;
+  for (const mesh_quality::TriangleQuality& quality : evaluation.report->triangles)
+  {
+    const std::optional<double> numeric = triangleMetricValue(quality, metric);
+    const std::optional<bool> boolean =
+      metric == mesh_quality::MeshQualityMetric::TriangleNormalConsistent
+        ? std::optional<bool>(quality.normalConsistent) : std::nullopt;
+    const mesh_quality::MeshQualityBand band = mesh_quality::classifyMetric(
+      metric, numeric, boolean, profile);
+    elementIds.at(static_cast<std::size_t>(band)).insert(quality.elementId);
+  }
+  for (std::size_t index = 0; index < elementIds.size(); ++index)
+  {
+    result.at(index) = buildOccSurfaceTriangulationImpl(mesh, &elementIds.at(index));
+  }
+  return result;
 }
 
 OccElementTriangulations buildOccElementTriangulations(

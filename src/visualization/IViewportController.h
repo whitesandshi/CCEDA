@@ -2,9 +2,11 @@
 
 #include "domain/MeshModel.h"
 #include "domain/Revisions.h"
+#include "mesh_quality/MeshQualityColoring.h"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -25,6 +27,13 @@ public:
 
 using PreparedMeshPresentationPtr = std::shared_ptr<const PreparedMeshPresentation>;
 
+struct MeshQualityColoringRequest
+{
+  mesh_quality::MeshQualityMetric metric =
+    mesh_quality::MeshQualityMetric::TriangleMinimumAngle;
+  mesh_quality::MeshQualityThresholdProfile profile;
+};
+
 class IViewportController
 {
 public:
@@ -36,7 +45,8 @@ public:
   virtual void displayCurrentGeometry() = 0;
   [[nodiscard]] virtual PreparedMeshPresentationPtr prepareMeshPresentation(
     const domain::MeshModel& mesh,
-    const std::vector<domain::MeshElementId>& locatableElementIds) const = 0;
+    const std::vector<domain::MeshElementId>& locatableElementIds,
+    const std::optional<MeshQualityColoringRequest>& coloring = std::nullopt) const = 0;
   [[nodiscard]] virtual bool displayMeshPresentation(
     const PreparedMeshPresentationPtr& presentation) = 0;
   virtual void clearMeshPresentation() = 0;

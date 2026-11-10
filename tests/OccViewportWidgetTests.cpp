@@ -43,7 +43,9 @@ public:
   void displayCurrentGeometry() override {}
   cceda::visualization::PreparedMeshPresentationPtr prepareMeshPresentation(
     const cceda::domain::MeshModel&,
-    const std::vector<cceda::domain::MeshElementId>&) const override
+    const std::vector<cceda::domain::MeshElementId>&,
+    const std::optional<cceda::visualization::MeshQualityColoringRequest>&)
+    const override
   {
     return {};
   }

@@ -137,7 +137,7 @@ add_library(cceda_visualization_occ STATIC
     src/visualization/OccViewportController.cpp)
 target_include_directories(cceda_visualization_occ PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_visualization_occ
-    PUBLIC cceda_geometry_occ TKOpenGl TKV3d TKService TKBRep)
+    PUBLIC cceda_geometry_occ cceda_mesh_quality TKOpenGl TKV3d TKService TKBRep)
 set_property(TARGET cceda_visualization_occ PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 qt_add_executable(cceda_gmsh_worker

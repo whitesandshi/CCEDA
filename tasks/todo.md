@@ -158,4 +158,5 @@
 
 - [x] Add an explicit dependency-free threshold and color-band contract.
 - [x] Add direction-aware validation and fail-closed classification tests.
-- [ ] Approve metric-specific threshold values and connect bands to the viewport.
+- [x] Connect validated bands to the OCCT viewport preparation and display port.
+- [ ] Approve metric-specific threshold values and expose the workbench control.

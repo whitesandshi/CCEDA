@@ -214,7 +214,8 @@ recomputes. The Controller now commits a quality-valid mesh through
 
 - [ ] Add quality coloring and approved threshold profiles.
   - [x] Add an explicit dependency-free threshold and color-band contract.
-  - [ ] Approve metric-specific threshold values and connect bands to the viewport.
+  - [x] Connect validated bands to the OCCT viewport preparation and display port.
+  - [ ] Approve metric-specific threshold values and expose the workbench control.
 - [ ] Persist current mesh settings, reports, and accepted quality results.
 
 ## Risks and Mitigations

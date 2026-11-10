@@ -22,10 +22,12 @@ class OccPreparedMeshPresentation final : public PreparedMeshPresentation
 public:
   OccPreparedMeshPresentation(occ::handle<Poly_Triangulation> triangulation,
                               OccElementTriangulations elementTriangulations,
+                              OccQualitySurfaceTriangulations qualityTriangulations,
                               domain::MeshRevision meshRevision,
                               domain::GeometryRevision sourceGeometryRevision)
       : triangulation_(std::move(triangulation)),
         elementTriangulations_(std::move(elementTriangulations)),
+        qualityTriangulations_(std::move(qualityTriangulations)),
         issueTriangulation_(buildOccIssueTriangulation(elementTriangulations_)),
         meshRevision_(meshRevision),
         sourceGeometryRevision_(sourceGeometryRevision)
@@ -73,9 +75,15 @@ public:
     return issueTriangulation_;
   }
 
+  const OccQualitySurfaceTriangulations& qualityTriangulations() const noexcept
+  {
+    return qualityTriangulations_;
+  }
+
 private:
   occ::handle<Poly_Triangulation> triangulation_;
   OccElementTriangulations elementTriangulations_;
+  OccQualitySurfaceTriangulations qualityTriangulations_{};
   occ::handle<Poly_Triangulation> issueTriangulation_;
   domain::MeshRevision meshRevision_ = 0;
   domain::GeometryRevision sourceGeometryRevision_ = 0;
@@ -145,9 +153,14 @@ void OccViewportController::displayCurrentGeometry()
   context_->RemoveAll(false);
   meshPresentation_.Nullify();
   meshIssuesPresentation_.Nullify();
+  for (auto& presentation : meshQualityPresentations_)
+  {
+    presentation.Nullify();
+  }
   meshElementHighlight_.Nullify();
   displayedMeshPresentation_.reset();
   meshVisible_ = false;
+  qualityColoring_ = false;
   issueElementsOnly_ = false;
   presentations_.clear();
   for (const geometry::OccShapeRecord& record : repository_->displayShapes())
@@ -167,7 +180,8 @@ void OccViewportController::displayCurrentGeometry()
 
 PreparedMeshPresentationPtr OccViewportController::prepareMeshPresentation(
   const domain::MeshModel& mesh,
-  const std::vector<domain::MeshElementId>& locatableElementIds) const
+  const std::vector<domain::MeshElementId>& locatableElementIds,
+  const std::optional<MeshQualityColoringRequest>& coloring) const
 {
   occ::handle<Poly_Triangulation> triangulation = buildOccSurfaceTriangulation(mesh);
   if (triangulation.IsNull())
@@ -175,9 +189,17 @@ PreparedMeshPresentationPtr OccViewportController::prepareMeshPresentation(
     return {};
   }
 
+  OccQualitySurfaceTriangulations qualityTriangulations{};
+  if (coloring)
+  {
+    qualityTriangulations = buildOccQualitySurfaceTriangulations(
+      mesh, coloring->metric, coloring->profile);
+  }
+
   return std::make_shared<OccPreparedMeshPresentation>(
     std::move(triangulation),
     buildOccElementTriangulations(mesh, locatableElementIds),
+    std::move(qualityTriangulations),
     mesh.meshRevision,
     mesh.sourceGeometryRevision);
 }
@@ -200,6 +222,27 @@ bool OccViewportController::displayMeshPresentation(
   clearMeshPresentation();
   meshPresentation_ = new AIS_Triangulation(prepared->triangulation());
   configureOccSurfacePresentation(meshPresentation_);
+  qualityColoring_ = false;
+  for (std::size_t index = 0; index < prepared->qualityTriangulations().size(); ++index)
+  {
+    const occ::handle<Poly_Triangulation>& triangulation =
+      prepared->qualityTriangulations().at(index);
+    if (triangulation.IsNull())
+    {
+      continue;
+    }
+    meshQualityPresentations_.at(index) = new AIS_Triangulation(triangulation);
+    const mesh_quality::MeshQualityColor color = mesh_quality::colorForBand(
+      static_cast<mesh_quality::MeshQualityBand>(index));
+    const Quantity_Color quantityColor(
+      color.red / 255.0, color.green / 255.0, color.blue / 255.0,
+      Quantity_TOC_sRGB);
+    configureOccSurfacePresentation(meshQualityPresentations_.at(index));
+    meshQualityPresentations_.at(index)->SetColor(quantityColor);
+    meshQualityPresentations_.at(index)->Attributes()->ShadingAspect()->SetColor(
+      quantityColor);
+    qualityColoring_ = true;
+  }
   if (!prepared->issueTriangulation().IsNull())
   {
     meshIssuesPresentation_ =
@@ -208,7 +251,7 @@ bool OccViewportController::displayMeshPresentation(
   }
   context_->ClearSelected(false);
   setGeometryVisible(false);
-  context_->Display(meshPresentation_, 0, -1, false);
+  displayMeshSurface();
   displayedMeshPresentation_ = presentation;
   meshVisible_ = true;
   issueElementsOnly_ = false;
@@ -230,11 +273,23 @@ void OccViewportController::clearMeshPresentation()
   {
     context_->Remove(meshIssuesPresentation_, false);
   }
+  if (ready())
+  {
+    for (auto& presentation : meshQualityPresentations_)
+    {
+      if (!presentation.IsNull())
+      {
+        context_->Remove(presentation, false);
+      }
+      presentation.Nullify();
+    }
+  }
   meshPresentation_.Nullify();
   meshIssuesPresentation_.Nullify();
   meshElementHighlight_.Nullify();
   displayedMeshPresentation_.reset();
   meshVisible_ = false;
+  qualityColoring_ = false;
   issueElementsOnly_ = false;
   setGeometryVisible(true);
   if (ready())
@@ -254,9 +309,7 @@ void OccViewportController::setMeshVisible(bool visible)
   {
     context_->ClearSelected(false);
     setGeometryVisible(false);
-    context_->Display(
-      issueElementsOnly_ ? meshIssuesPresentation_ : meshPresentation_,
-      0, -1, false);
+    displayMeshSurface();
   }
   else
   {
@@ -265,11 +318,7 @@ void OccViewportController::setMeshVisible(bool visible)
       context_->Remove(meshElementHighlight_, false);
       meshElementHighlight_.Nullify();
     }
-    context_->Erase(meshPresentation_, false);
-    if (!meshIssuesPresentation_.IsNull())
-    {
-      context_->Erase(meshIssuesPresentation_, false);
-    }
+    eraseMeshSurface();
     setGeometryVisible(true);
   }
   meshVisible_ = visible;
@@ -291,11 +340,9 @@ bool OccViewportController::setIssueElementsOnly(
     return true;
   }
 
-  context_->Erase(
-    issueElementsOnly_ ? meshIssuesPresentation_ : meshPresentation_, false);
-  context_->Display(
-    enabled ? meshIssuesPresentation_ : meshPresentation_, 0, -1, false);
+  eraseMeshSurface();
   issueElementsOnly_ = enabled;
+  displayMeshSurface();
   view_->Redraw();
   return true;
 }
@@ -420,6 +467,60 @@ void OccViewportController::zoom(double factor)
 bool OccViewportController::ready() const noexcept
 {
   return !view_.IsNull() && !context_.IsNull();
+}
+
+void OccViewportController::displayMeshSurface()
+{
+  if (!ready())
+  {
+    return;
+  }
+  if (issueElementsOnly_)
+  {
+    if (!meshIssuesPresentation_.IsNull())
+    {
+      context_->Display(meshIssuesPresentation_, 0, -1, false);
+    }
+    return;
+  }
+  if (qualityColoring_)
+  {
+    for (const auto& presentation : meshQualityPresentations_)
+    {
+      if (!presentation.IsNull())
+      {
+        context_->Display(presentation, 0, -1, false);
+      }
+    }
+    return;
+  }
+  if (!meshPresentation_.IsNull())
+  {
+    context_->Display(meshPresentation_, 0, -1, false);
+  }
+}
+
+void OccViewportController::eraseMeshSurface()
+{
+  if (!ready())
+  {
+    return;
+  }
+  if (!meshIssuesPresentation_.IsNull())
+  {
+    context_->Erase(meshIssuesPresentation_, false);
+  }
+  for (const auto& presentation : meshQualityPresentations_)
+  {
+    if (!presentation.IsNull())
+    {
+      context_->Erase(presentation, false);
+    }
+  }
+  if (!meshPresentation_.IsNull())
+  {
+    context_->Erase(meshPresentation_, false);
+  }
 }
 
 void OccViewportController::setGeometryVisible(bool visible)

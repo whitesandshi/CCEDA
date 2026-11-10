@@ -1,10 +1,12 @@
 #pragma once
 
 #include "domain/MeshModel.h"
+#include "mesh_quality/MeshQualityColoring.h"
 
 #include <AIS_Triangulation.hxx>
 #include <Poly_Triangulation.hxx>
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -12,6 +14,15 @@ namespace cceda::visualization
 {
 [[nodiscard]] occ::handle<Poly_Triangulation> buildOccSurfaceTriangulation(
   const domain::MeshModel& mesh);
+
+using OccQualitySurfaceTriangulations = std::array<
+  occ::handle<Poly_Triangulation>, 4>;
+
+[[nodiscard]] OccQualitySurfaceTriangulations
+buildOccQualitySurfaceTriangulations(
+  const domain::MeshModel& mesh,
+  mesh_quality::MeshQualityMetric metric,
+  const mesh_quality::MeshQualityThresholdProfile& profile);
 
 using OccElementTriangulations = std::unordered_map<
   domain::MeshElementId, occ::handle<Poly_Triangulation>>;

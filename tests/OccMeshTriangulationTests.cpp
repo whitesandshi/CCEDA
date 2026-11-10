@@ -10,6 +10,7 @@
 #include <gp_Pnt.hxx>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -143,6 +144,33 @@ int main()
       makeCommittedMesh(), 9999).IsNull(),
     "an unknown element ID cannot produce locator geometry");
 
+  cceda::mesh_quality::MeshQualityThresholdProfile coloringProfile{
+    "test-v1",
+    {{cceda::mesh_quality::MeshQualityMetric::TriangleMinimumAngle,
+      {20.0, 10.0}}},
+  };
+  const auto colored = cceda::visualization::buildOccQualitySurfaceTriangulations(
+    makeCommittedMesh(),
+    cceda::mesh_quality::MeshQualityMetric::TriangleMinimumAngle,
+    coloringProfile);
+  expect(!colored.at(static_cast<std::size_t>(
+      cceda::mesh_quality::MeshQualityBand::Good)).IsNull()
+      && colored.at(static_cast<std::size_t>(
+        cceda::mesh_quality::MeshQualityBand::Good))->NbTriangles() == 1,
+    "quality preparation places a passing triangle in the good band");
+  expect(colored.at(static_cast<std::size_t>(
+      cceda::mesh_quality::MeshQualityBand::Critical)).IsNull(),
+    "quality preparation leaves empty bands without presentations");
+
+  const auto invalidProfile = cceda::visualization::buildOccQualitySurfaceTriangulations(
+    makeCommittedMesh(),
+    cceda::mesh_quality::MeshQualityMetric::TriangleMinimumAngle,
+    {"invalid", {{cceda::mesh_quality::MeshQualityMetric::TriangleMinimumAngle,
+      {10.0, 20.0}}}});
+  expect(std::all_of(invalidProfile.cbegin(), invalidProfile.cend(),
+      [](const auto& value) { return value.IsNull(); }),
+    "quality preparation rejects an invalid threshold profile");
+
   const auto repository = std::make_shared<cceda::geometry::OccGeometryRepository>();
   cceda::visualization::OccViewportController controller(repository);
   const cceda::visualization::PreparedMeshPresentationPtr prepared =
@@ -151,6 +179,16 @@ int main()
       && prepared->sourceGeometryRevision() == 3 && prepared->triangleCount() == 1
       && prepared->locatableElementCount() == 2,
     "the opaque viewport contract retains exact revision and surface metadata");
+  const cceda::visualization::MeshQualityColoringRequest coloringRequest{
+    cceda::mesh_quality::MeshQualityMetric::TriangleMinimumAngle,
+    coloringProfile,
+  };
+  const cceda::visualization::PreparedMeshPresentationPtr coloredPrepared =
+    controller.prepareMeshPresentation(
+      makeCommittedMesh(), {1001, 1002, 9999}, coloringRequest);
+  expect(coloredPrepared != nullptr && coloredPrepared->meshRevision() == 7
+      && coloredPrepared->triangleCount() == 1,
+    "the viewport contract accepts revision-bound quality coloring preparation");
   expect(!controller.displayMeshPresentation(prepared),
     "display fails closed before the viewport has a native window");
 

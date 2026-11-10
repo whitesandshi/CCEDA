@@ -265,6 +265,8 @@ snapshot only with issue-bounded element details.
   `Good` and `false` as `Critical`.
 - Missing or non-finite metric values, and metrics without an explicit profile
   entry, classify as `Unavailable`.
-- The profile contract does not establish approved product threshold values,
-  percentile policies, or a viewport presentation format. Those remain the
-  next integration slice.
+- The current OCCT adapter accepts a validated profile during background mesh
+  presentation preparation, groups Triangle3 elements by band, and displays
+  each non-empty band as a separate surface presentation. Approved product
+  threshold values, percentile policies, and the workbench control remain
+  future contracts.

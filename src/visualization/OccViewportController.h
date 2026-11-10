@@ -11,7 +11,9 @@
 #include <V3d_Viewer.hxx>
 #include <WNT_Window.hxx>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -34,7 +36,8 @@ public:
   void displayCurrentGeometry() override;
   [[nodiscard]] PreparedMeshPresentationPtr prepareMeshPresentation(
     const domain::MeshModel& mesh,
-    const std::vector<domain::MeshElementId>& locatableElementIds) const override;
+    const std::vector<domain::MeshElementId>& locatableElementIds,
+    const std::optional<MeshQualityColoringRequest>& coloring = std::nullopt) const override;
   [[nodiscard]] bool displayMeshPresentation(
     const PreparedMeshPresentationPtr& presentation) override;
   void clearMeshPresentation() override;
@@ -54,6 +57,8 @@ public:
 
 private:
   [[nodiscard]] bool ready() const noexcept;
+  void displayMeshSurface();
+  void eraseMeshSurface();
   void setGeometryVisible(bool visible);
 
   std::shared_ptr<geometry::OccGeometryRepository> repository_;
@@ -66,9 +71,11 @@ private:
   std::unordered_map<std::string, occ::handle<AIS_Shape>> presentations_;
   occ::handle<AIS_Triangulation> meshPresentation_;
   occ::handle<AIS_Triangulation> meshIssuesPresentation_;
+  std::array<occ::handle<AIS_Triangulation>, 4> meshQualityPresentations_{};
   occ::handle<AIS_Triangulation> meshElementHighlight_;
   PreparedMeshPresentationPtr displayedMeshPresentation_;
   bool meshVisible_ = false;
+  bool qualityColoring_ = false;
   bool issueElementsOnly_ = false;
 };
 }
