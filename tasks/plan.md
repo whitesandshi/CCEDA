@@ -219,6 +219,8 @@ recomputes. The Controller now commits a quality-valid mesh through
   - [x] Verify Release build and all 24 tests with unrestricted temporary-file access.
   - [ ] Complete desktop visual acceptance and approve preset threshold profiles.
 - [ ] Persist current mesh settings, reports, and accepted quality results.
+  - [x] Implement and test the versioned mesh/settings.json entry codec.
+  - [ ] Integrate settings with consistent project snapshots and package Save/Open.
 
 ## Risks and Mitigations
 

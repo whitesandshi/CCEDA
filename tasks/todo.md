@@ -162,3 +162,10 @@
 - [x] Expose surface metrics, explicit user thresholds, Apply, and the applied legend.
 - [x] Verify Release build and all 24 tests with unrestricted temporary-file access.
 - [ ] Complete desktop visual acceptance and approve preset threshold profiles.
+
+## Project Persistence
+
+- [x] Specify mesh/settings.json 0.1 with explicit complete fields and bounded parsing.
+- [x] Implement deterministic serialization and validated deserialization over existing domain types.
+- [x] Test full-field roundtrip and malformed, duplicate, incompatible, and oversized input.
+- [ ] Integrate settings with consistent project snapshots and package Save/Open.

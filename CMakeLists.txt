@@ -51,6 +51,11 @@ target_include_directories(cceda_mesh_quality
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_mesh_quality PUBLIC cceda_domain)
 
+add_library(cceda_project_settings STATIC
+    src/persistence/MeshSettingsJson.cpp
+    src/persistence/MeshSettingsJson.h)
+target_link_libraries(cceda_project_settings PUBLIC Qt6::Core cceda_domain)
+
 add_library(cceda_mesh_gmsh STATIC
     src/meshing/GmshMsh41Reader.cpp)
 target_include_directories(cceda_mesh_gmsh PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -386,6 +391,10 @@ if(BUILD_TESTING)
     target_link_libraries(cceda_mesh_quality_tests PRIVATE
         cceda_mesh_quality)
     add_test(NAME mesh.quality COMMAND cceda_mesh_quality_tests)
+
+    add_executable(cceda_mesh_settings_json_tests tests/MeshSettingsJsonTests.cpp)
+    target_link_libraries(cceda_mesh_settings_json_tests PRIVATE cceda_project_settings)
+    add_test(NAME persistence.mesh_settings_json COMMAND cceda_mesh_settings_json_tests)
 
     add_executable(cceda_mesh_quality_coloring_tests
         tests/MeshQualityColoringTests.cpp)

@@ -176,3 +176,40 @@ Opening MUST NOT reimport STEP or silently modify the package.
 ## 15. Deferred Features
 
 Incremental/autosave logs, multiple mesh versions, external resources, cloud collaboration, encryption, signing, and access control are deferred.
+
+## 16. Mesh Settings Entry Version 0.1
+
+The implemented `cceda_project_settings` adapter encodes and decodes the logical
+`mesh/settings.json` entry as UTF-8 JSON. Its byte API returns a complete typed
+value or a typed error. File I/O and project-state application belong to the
+future package transaction.
+
+Every field below is required. All objects have exactly the listed members.
+
+| Object | Members |
+| --- | --- |
+| Root | `schema`, `canonicalUnit`, `mode`, `generation`, `resourceLimits`, `retry` |
+| `schema` | `name` = `cceda.mesh-settings`, `major` = 0, `minor` = 1 |
+| `generation` | `minimumSizeMm`, `maximumSizeMm`, `curvatureElementsPerCircle`, `optimizeTetrahedra`, `maximumThreads`, `algorithm` |
+| `resourceLimits` | `maximumElapsedMilliseconds`, `maximumWorkingSetBytes` |
+| `retry` | `automaticRetry`, `maximumAttempts` |
+
+`canonicalUnit` is `mm`. Mode is `independent-solids` or
+`conformal-multi-region`. Algorithm is `delaunay` or `hxt`. Boolean settings
+require JSON booleans. Counts and limits require nonnegative integral JSON
+numbers within the existing domain limits, and sizes require finite numbers
+satisfying `isValidMeshGenerationSettings`. Zero retains its existing automatic
+size/thread or disabled resource-limit meaning. Both retry fields are recorded
+even when automatic retry is disabled.
+
+Readers enforce a 16 KiB byte budget and maximum nesting depth of four before
+parsing. Malformed UTF-8, BOM, missing or unknown members, duplicate keys,
+unsupported schema versions, unknown enum strings, and invalid field types or
+ranges are rejected. Versions other than 0.1 require a future explicit reader
+or migration. Missing fields produce errors. Writers validate the complete
+value and emit deterministic compact JSON with all fields present.
+
+Acceptance covers all-field roundtrip, exact large memory limits, explicit
+zero/disabled settings, deterministic re-encoding, and rejection of malformed
+or incompatible data without returning partial settings. Full ZIP packaging,
+geometry persistence, and workbench project Save/Open remain pending.
