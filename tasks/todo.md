@@ -168,4 +168,6 @@
 - [x] Specify mesh/settings.json 0.1 with explicit complete fields and bounded parsing.
 - [x] Implement deterministic serialization and validated deserialization over existing domain types.
 - [x] Test full-field roundtrip and malformed, duplicate, incompatible, and oversized input.
+- [x] Store committed quality under a dedicated project schema and verify it against the decoded mesh.
+- [x] Test paired meshbin/quality restoration, accepted warnings, revision mismatches, tampering, and budgets.
 - [ ] Integrate settings with consistent project snapshots and package Save/Open.

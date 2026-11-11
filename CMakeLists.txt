@@ -86,6 +86,11 @@ target_include_directories(cceda_mesh_quality_json
 target_link_libraries(cceda_mesh_quality_json
     PUBLIC Qt6::Core cceda_mesh_quality)
 
+add_library(cceda_project_quality STATIC
+    src/persistence/ProjectMeshQuality.cpp
+    src/persistence/ProjectMeshQuality.h)
+target_link_libraries(cceda_project_quality PUBLIC cceda_mesh_quality_json)
+
 add_library(cceda_meshing_protocol STATIC
     src/meshing/GeometryMap.cpp
     src/meshing/GeometryMap.h)
@@ -395,6 +400,10 @@ if(BUILD_TESTING)
     add_executable(cceda_mesh_settings_json_tests tests/MeshSettingsJsonTests.cpp)
     target_link_libraries(cceda_mesh_settings_json_tests PRIVATE cceda_project_settings)
     add_test(NAME persistence.mesh_settings_json COMMAND cceda_mesh_settings_json_tests)
+
+    add_executable(cceda_project_quality_tests tests/ProjectMeshQualityTests.cpp)
+    target_link_libraries(cceda_project_quality_tests PRIVATE cceda_project_quality cceda_mesh_codec)
+    add_test(NAME persistence.mesh_quality COMMAND cceda_project_quality_tests)
 
     add_executable(cceda_mesh_quality_coloring_tests
         tests/MeshQualityColoringTests.cpp)

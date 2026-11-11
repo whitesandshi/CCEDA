@@ -319,18 +319,19 @@ bool requiredNumericMetric(quality::MeshQualityMetric metric)
 
 namespace cceda::meshing
 {
-MeshQualityJsonWriteResult writeMeshQualityJson(
+static MeshQualityJsonWriteResult writeQualityJson(
   const mesh_quality::MeshQualityReport& report,
   const QString& jobId,
-  const MeshQualityJsonLimits& limits)
+  const MeshQualityJsonLimits& limits,
+  bool committed)
 {
   if (!validLimits(limits))
   {
     return writeFailure(MeshQualityJsonErrorCode::InvalidLimits,
       "Mesh quality JSON writer limits are invalid");
   }
-  if (!validJobId(jobId)
-      || report.meshRevision != 0
+  if ((!committed && (!validJobId(jobId) || report.meshRevision != 0))
+      || (committed && (report.meshRevision == 0 || report.meshRevision > JsonSafeInteger))
       || report.sourceGeometryRevision == 0
       || report.sourceGeometryRevision > JsonSafeInteger)
   {
@@ -455,9 +456,9 @@ MeshQualityJsonWriteResult writeMeshQualityJson(
     });
   }
 
-  const QJsonObject root{
+  QJsonObject root{
     {"schema", QJsonObject{
-      {"name", "cceda.mesh-quality-worker"},
+      {"name", committed ? "cceda.mesh-quality-project" : "cceda.mesh-quality-worker"},
       {"major", MeshQualityJsonSchemaMajor},
       {"minor", MeshQualityJsonSchemaMinor},
     }},
@@ -478,6 +479,10 @@ MeshQualityJsonWriteResult writeMeshQualityJson(
     {"summaries", summaries},
     {"issues", issues},
   };
+  if (committed)
+  {
+    root.remove("jobId");
+  }
   const QByteArray bytes =
     QJsonDocument(root).toJson(QJsonDocument::Compact);
   if (static_cast<std::uint64_t>(bytes.size()) > limits.maximumInputBytes)
@@ -486,6 +491,21 @@ MeshQualityJsonWriteResult writeMeshQualityJson(
       "Mesh quality JSON exceeds the byte budget");
   }
   return {bytes, MeshQualityJsonErrorCode::None, {}};
+}
+
+MeshQualityJsonWriteResult writeMeshQualityJson(
+  const mesh_quality::MeshQualityReport& report,
+  const QString& jobId,
+  const MeshQualityJsonLimits& limits)
+{
+  return writeQualityJson(report, jobId, limits, false);
+}
+
+MeshQualityJsonWriteResult writeCommittedMeshQualityJson(
+  const mesh_quality::MeshQualityReport& report,
+  const MeshQualityJsonLimits& limits)
+{
+  return writeQualityJson(report, {}, limits, true);
 }
 
 MeshQualityJsonReadResult readMeshQualityJson(

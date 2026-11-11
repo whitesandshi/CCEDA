@@ -104,6 +104,11 @@ struct MeshQualityJsonWriteResult
   const QString& jobId,
   const MeshQualityJsonLimits& limits = {});
 
+// Shared metric serialization for the committed project-quality entry.
+[[nodiscard]] MeshQualityJsonWriteResult writeCommittedMeshQualityJson(
+  const mesh_quality::MeshQualityReport& report,
+  const MeshQualityJsonLimits& limits = {});
+
 [[nodiscard]] MeshQualityJsonReadResult readMeshQualityJson(
   QIODevice& input,
   const MeshQualityJsonLimits& limits = {});

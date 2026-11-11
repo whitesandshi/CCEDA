@@ -213,3 +213,40 @@ Acceptance covers all-field roundtrip, exact large memory limits, explicit
 zero/disabled settings, deterministic re-encoding, and rejection of malformed
 or incompatible data without returning partial settings. Full ZIP packaging,
 geometry persistence, and workbench project Save/Open remain pending.
+
+## 17. Committed Mesh Quality Entry Version 0.1
+
+The `cceda_project_quality` adapter produces `mesh/quality.json` using schema
+`cceda.mesh-quality-project/0.1`. The root contains `schema`, `meshRevision`,
+`sourceGeometryRevision`, `metricVersion`, `validForCommit`, `counts`,
+`summaries`, and `issues`. Summaries, issue ordering, metric identifiers, and
+formulas follow the quality specification. Both revisions are positive and
+within the quality JSON safe-integer range. Each supported stored mesh has
+at least one Triangle3 and one Tetrahedron4, matching the current volume pipeline.
+
+Writing accepts a structurally valid committed `MeshModel`, recomputes its
+quality, and requires commit-valid results. Orientation warnings may be stored.
+The entry carries committed revision identity. Job provenance belongs in the
+task history. The shared serializer supplies the existing canonical numeric
+summaries and issue representation.
+
+Reading requires the corresponding decoded committed mesh. It checks the input
+byte budget first, independently evaluates the mesh, generates canonical project
+quality JSON, and requires byte-for-byte equality with the stored entry. The
+format therefore requires canonical compact JSON, including key order and number
+formatting. Edited whitespace, duplicate or extra fields, unknown versions,
+changed summaries, and mismatched revisions all fail validation. Callers receive
+a typed error with no report on failure, or the recomputed transient report on
+success. Bounded issue details can then be rebuilt before discarding per-element
+arrays. Default output/input and issue budgets reuse 16 MiB and 100,000 issues.
+
+This module validates quality consistency. The package transaction must also
+verify mesh and quality entry hashes, geometry mappings, and the current geometry
+revision before applying either entry to live project state. Threshold policies
+and package Save/Open integration remain pending.
+
+Acceptance includes paired meshbin/quality roundtrip, exact committed revisions,
+preserved accepted warning IDs and reconstructed details, rejection of modified
+metrics or revisions, resource-budget failures, and separation of Worker and
+project schemas. Cross-build floating-point reproducibility remains an acceptance
+requirement for future package compatibility support.

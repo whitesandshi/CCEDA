@@ -220,6 +220,7 @@ recomputes. The Controller now commits a quality-valid mesh through
   - [ ] Complete desktop visual acceptance and approve preset threshold profiles.
 - [ ] Persist current mesh settings, reports, and accepted quality results.
   - [x] Implement and test the versioned mesh/settings.json entry codec.
+  - [x] Add committed mesh/quality.json storage with independent recomputation and paired meshbin tests.
   - [ ] Integrate settings with consistent project snapshots and package Save/Open.
 
 ## Risks and Mitigations
