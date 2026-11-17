@@ -68,6 +68,7 @@ struct ProjectManifestReadResult
   const ProjectManifest& manifest);
 [[nodiscard]] ProjectManifestJsonError validateProjectManifest(
   const ProjectManifest& manifest);
+[[nodiscard]] bool isSafeProjectResourcePath(const QString& path);
 [[nodiscard]] ProjectManifestReadResult readProjectManifestJson(
   const QByteArray& bytes);
 }

@@ -223,6 +223,7 @@ recomputes. The Controller now commits a quality-valid mesh through
   - [x] Add committed mesh/quality.json storage with independent recomputation and paired meshbin tests.
   - [x] Add deterministic manifest JSON with bounded safe logical paths and entry hashes.
   - [x] Add streaming package-resource integrity checks, feature compatibility gates, and total-size budgets.
+  - [x] Add bounded ZIP32/ZIP64 container I/O, exclusive verified staging writes, and independent interoperability tests.
   - [ ] Integrate settings with consistent project snapshots and package Save/Open.
 
 ## Risks and Mitigations

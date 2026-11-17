@@ -279,9 +279,9 @@ normalize entry and feature ordering. Writers validate, sort, and emit determini
 compact JSON. The manifest does not hash itself. Package transactions write
 `manifest.json` last after all resource hashes have been computed.
 
-The current module covers manifest bytes and validation. ZIP container I/O,
-resource extraction, and atomic package Save/Open remain pending. Resource
-integrity checking is provided by the following adapter.
+The manifest codec covers bytes and validation. Resource integrity and ZIP
+container I/O are provided by the following adapters. Resource decoding and
+atomic package Save/Open integration remain pending.
 
 ## 19. Streaming Project Resource Verification
 
@@ -310,7 +310,7 @@ archive names, compression-ratio limits, link handling, and safe resource lookup
 Logical names must not be resolved directly against an untrusted filesystem
 directory. This verifier neither extracts resources nor changes project state.
 Payload decoding, project-ID/reference checks, exact geometry/mesh revision
-checks, optional undo-snapshot recovery, ZIP64 I/O, and atomic Save/Open integration
+checks, optional undo-snapshot recovery, and atomic Save/Open integration
 remain separate pending work. Until undo recovery is implemented, declared
 snapshot corruption is conservatively rejected.
 
@@ -318,3 +318,60 @@ Acceptance covers required declarations, resource pairs, unsupported features,
 pre-I/O budgets, missing resources, same-size tampering, truncated/extra data,
 missing optional logs, mid-stream failures, invalid devices, sequential short
 reads, empty resources, and multi-buffer real-file verification.
+
+## 20. ZIP Container Adapter
+
+`cceda_project_zip` implements ZIP32/ZIP64 reading and exclusive new ZIP64 staging
+file writing on Windows. miniz 3.1.2 is vendored at a fixed commit; its MIT license
+and provenance are in `third_party/miniz`. The domain and public adapter headers
+contain no miniz types. Build-time network access and external archive tools are
+not required. No extraction API is enabled.
+
+`ProjectZipReader::open` requires a `.cceda` path and retains a Windows file handle
+that denies other writers and deletion. Before returning a reader it checks the
+archive directory and local headers, decodes the manifest, reconciles exact entry
+names and sizes, and verifies all resources through the streaming verifier.
+Resource devices retain the shared handle and may outlive the reader. The reader
+and its devices are single-thread objects; independent packages can be opened
+on independent threads. Consumers must read to EOF to observe final stream CRC
+status. The initial open always performs that complete verification.
+
+The initial container profile accepts Stored and Deflate entries. It rejects
+encryption, directory entries, links/special file attributes, invalid UTF-8 names,
+case-folded duplicates, unsafe logical paths, file/directory name collisions,
+overlapping entry ranges, local/central header disagreements, undeclared files,
+and invalid CRC or SHA-256. No entry name is resolved as a filesystem path.
+ZIP32 and ZIP64 data descriptors, with or without signatures, are validated
+against the central-directory sizes and CRC. Metadata checks include empty files.
+
+Default compressed archive size is limited to 9 GiB, declared resource bytes to
+8 GiB, and each entry's expansion ratio to 2,000; callers can configure these
+limits. The manifest has its independent 2 MiB limit. Entry count is at most
+10,001 including the manifest, filenames at most 511 UTF-8 bytes, and miniz
+allocations (including allocation headers) have a 32 MiB per-archive budget before
+central-directory parsing. Large resource payloads are streamed. Full large-entry
+acceptance beyond the default resource budget remains a separate performance gate.
+
+`writeNewProjectZip` takes an immutable manifest/resource set and creates a new
+staging path using `CREATE_NEW`. It prevalidates inputs, streams and hashes them
+again while writing, compresses resources with Deflate, and writes the bounded
+manifest last as a Stored entry. It finalizes and closes the ZIP writer, flushes,
+and opens a fresh reader for full verification while retaining an ownership
+handle that excludes competing writes/renames/deletion. The ownership handle is
+released only after verification. Failure marks that owned handle for deletion;
+cleanup never re-resolves a path that another process could replace. Existing
+files are never overwritten. A save requires every declared resource, including
+logs; an open retains the verifier's missing-optional-log warnings.
+
+This is the container layer. Capturing a consistent live project snapshot,
+encoding `project.json`/XCAF, checking domain identity and revisions on restore,
+atomically replacing an existing project, and clearing its dirty flag are still
+pending. No project Save/Open command is exposed by this increment.
+
+Acceptance includes compressed/stored roundtrip, Unicode names, empty resources,
+retained stream lifetime and file locks, failed-write cleanup, unchanged existing
+targets, changed source bytes, count/memory/ratio/size budgets, malformed and
+tampered containers, and real ZIP64 offsets above 4 GiB using sparse fixtures.
+When Python is available, a standard-library interoperability test checks the
+writer's CRCs/hashes and reads Python-produced ZIP32/ZIP64 packages with both
+seekable output and sequential data descriptors.

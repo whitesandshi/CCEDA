@@ -174,4 +174,7 @@
 - [x] Test malformed, duplicate, oversized input and normalization of valid JSON ordering/whitespace.
 - [x] Add bounded streaming resource verification with required declarations, feature gates, sizes, and SHA-256.
 - [x] Test tampering, resource pairs, pre-I/O budgets, optional logs, sequential reads, I/O failures, and real files.
+- [x] Add the pinned miniz ZIP32/ZIP64 adapter with bounded directory parsing and streaming resources.
+- [x] Add exclusively owned staging writes, source revalidation, reopen verification, and handle-based cleanup.
+- [x] Test hostile containers, file locks, source changes, true 64-bit offsets, and Python ZIP interoperability.
 - [ ] Integrate settings with consistent project snapshots and package Save/Open.

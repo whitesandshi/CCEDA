@@ -108,6 +108,8 @@ void normalize(ProjectManifest& manifest)
 }
 }
 
+bool isSafeProjectResourcePath(const QString& path) { return safePath(path); }
+
 ProjectManifestJsonError validateProjectManifest(const ProjectManifest& manifest)
 {
   if (manifest.formatVersion != "0.1") { return ProjectManifestJsonError::UnsupportedVersion; }

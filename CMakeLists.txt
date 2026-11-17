@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CCEDA VERSION 0.2.0 LANGUAGES CXX)
+project(CCEDA VERSION 0.2.0 LANGUAGES C CXX)
 
 if(MSVC AND CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Release" CACHE STRING "Supported configurations" FORCE)
@@ -67,6 +67,24 @@ if(MSVC)
     target_compile_options(cceda_project_resources PRIVATE /utf-8 /W4)
 endif()
 set_target_properties(cceda_project_settings cceda_project_resources PROPERTIES FOLDER "Libraries")
+
+add_library(cceda_miniz STATIC
+    third_party/miniz/miniz.c
+    third_party/miniz/miniz_tdef.c
+    third_party/miniz/miniz_tinfl.c
+    third_party/miniz/miniz_zip.c)
+target_include_directories(cceda_miniz PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz")
+target_compile_definitions(cceda_miniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+set_target_properties(cceda_miniz PROPERTIES AUTOMOC OFF AUTOUIC OFF FOLDER "Third Party")
+
+add_library(cceda_project_zip STATIC
+    src/persistence/ProjectZipArchive.cpp
+    src/persistence/ProjectZipArchive.h)
+target_link_libraries(cceda_project_zip PUBLIC cceda_project_resources PRIVATE cceda_miniz)
+set_target_properties(cceda_project_zip PROPERTIES FOLDER "Libraries")
+if(MSVC)
+    target_compile_options(cceda_project_zip PRIVATE /utf-8 /W4)
+endif()
 
 add_library(cceda_mesh_gmsh STATIC
     src/meshing/GmshMsh41Reader.cpp)
@@ -424,6 +442,23 @@ if(BUILD_TESTING)
     add_executable(cceda_project_resource_tests tests/ProjectResourceVerificationTests.cpp)
     target_link_libraries(cceda_project_resource_tests PRIVATE cceda_project_resources)
     add_test(NAME persistence.project_resources COMMAND cceda_project_resource_tests)
+
+    add_executable(cceda_project_zip_tests tests/ProjectZipArchiveTests.cpp)
+    target_link_libraries(cceda_project_zip_tests PRIVATE cceda_project_zip cceda_miniz)
+    set_target_properties(cceda_project_zip_tests PROPERTIES FOLDER "Tests")
+    if(MSVC)
+        target_compile_options(cceda_project_zip_tests PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME persistence.project_zip COMMAND cceda_project_zip_tests)
+    set_tests_properties(persistence.project_zip PROPERTIES TIMEOUT 30
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME persistence.project_zip_interop COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/ProjectZipInterop.py" $<TARGET_FILE:cceda_project_zip_tests>)
+        set_tests_properties(persistence.project_zip_interop PROPERTIES TIMEOUT 30
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+    endif()
     set_tests_properties(persistence.project_manifest persistence.project_resources PROPERTIES
         TIMEOUT 30
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
