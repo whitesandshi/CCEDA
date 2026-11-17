@@ -170,4 +170,8 @@
 - [x] Test full-field roundtrip and malformed, duplicate, incompatible, and oversized input.
 - [x] Store committed quality under a dedicated project schema and verify it against the decoded mesh.
 - [x] Test paired meshbin/quality restoration, accepted warnings, revision mismatches, tampering, and budgets.
+- [x] Add deterministic manifest JSON with safe logical paths, unique entries, hashes, and size limits.
+- [x] Test malformed, duplicate, oversized input and normalization of valid JSON ordering/whitespace.
+- [x] Add bounded streaming resource verification with required declarations, feature gates, sizes, and SHA-256.
+- [x] Test tampering, resource pairs, pre-I/O budgets, optional logs, sequential reads, I/O failures, and real files.
 - [ ] Integrate settings with consistent project snapshots and package Save/Open.

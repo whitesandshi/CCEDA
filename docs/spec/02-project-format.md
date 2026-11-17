@@ -250,3 +250,71 @@ preserved accepted warning IDs and reconstructed details, rejection of modified
 metrics or revisions, resource-budget failures, and separation of Worker and
 project schemas. Cross-build floating-point reproducibility remains an acceptance
 requirement for future package compatibility support.
+
+## 18. Manifest Entry Version 0.1
+
+`manifest.json` uses the root fields `format`, `formatVersion`, `projectId`,
+`createdBy`, `createdAt`, `modifiedAt`, `occtVersion`, `canonicalLengthUnit`,
+`entries`, and `requiredFeatures`. The format is `cceda-project`, version
+`0.1`, and the canonical length unit is `mm`. `createdBy` is a nonempty string
+identifying application/version/build (for example `CCEDA/0.2.0+build-id`).
+Project IDs use the UUID 8-4-4-4-12 hexadecimal form. Timestamps are valid UTC
+ISO 8601 date-times ending in `Z`, with optional one-to-three fractional digits.
+
+Each entry has `path`, `role`, `uncompressedBytes`, and a lowercase hexadecimal
+SHA-256 digest. Paths are relative slash-separated package paths without empty
+segments, `.`, `..`, drive prefixes, absolute roots, backslashes, or repeated
+slashes or control characters. `manifest.json` cannot appear in its own entry
+list. Path uniqueness is case-folded to prevent Windows aliases. Required feature
+IDs are non-empty and unique. The manifest has at least one entry,
+at most 10,000 entries, a 2 MiB encoded size limit, and a 512 GiB per-entry
+uncompressed-size limit. Strings are bounded to 1,024 UTF-16 code units,
+required features to 128, and JSON nesting to three levels.
+
+Readers require exact root and entry members, supported format version, valid
+identities, safe logical paths, valid hashes, and bounded integral sizes.
+Missing, extra, duplicate, malformed, BOM, invalid UTF-8, or trailing non-whitespace
+data is rejected. Valid JSON whitespace and input ordering are accepted; readers
+normalize entry and feature ordering. Writers validate, sort, and emit deterministic
+compact JSON. The manifest does not hash itself. Package transactions write
+`manifest.json` last after all resource hashes have been computed.
+
+The current module covers manifest bytes and validation. ZIP container I/O,
+resource extraction, and atomic package Save/Open remain pending. Resource
+integrity checking is provided by the following adapter.
+
+## 19. Streaming Project Resource Verification
+
+`cceda_project_resources` validates a manifest and the uncompressed resource
+streams supplied by a container adapter. Before any resource is opened it checks
+the manifest bounds, explicitly supported required features, total declared size,
+and declarations for `project.json`, `geometry/healing-history.json`, and
+`mesh/settings.json`. Original STEP and canonical XCAF must be declared together;
+current mesh and quality must be declared together. A stored mesh also requires
+the geometry pair. The total resource budget defaults to 8 GiB and is configurable
+by the caller; summation uses overflow-safe subtraction. The manifest itself is
+bounded by its separate 2 MiB limit.
+
+Each declared resource is opened once and hashed with SHA-256 through a fixed
+64 KiB buffer. Short reads and sequential devices are supported. Streams must
+be fresh, open, binary, and readable. A premature end, extra bytes, read failure,
+zero read before EOF, or digest mismatch fails verification with an entry path.
+At most one extra byte beyond a declaration is requested to detect excess data.
+Only a genuinely missing `logs/` entry with role `log` is tolerated, and its path
+is returned as a warning on complete success. Present corrupted logs and log I/O
+errors fail verification. Failed results do not expose a partial success report.
+
+The provider must supply streams from one immutable package snapshot and
+distinguish absence from I/O failure. It owns container validation, duplicate
+archive names, compression-ratio limits, link handling, and safe resource lookup.
+Logical names must not be resolved directly against an untrusted filesystem
+directory. This verifier neither extracts resources nor changes project state.
+Payload decoding, project-ID/reference checks, exact geometry/mesh revision
+checks, optional undo-snapshot recovery, ZIP64 I/O, and atomic Save/Open integration
+remain separate pending work. Until undo recovery is implemented, declared
+snapshot corruption is conservatively rejected.
+
+Acceptance covers required declarations, resource pairs, unsupported features,
+pre-I/O budgets, missing resources, same-size tampering, truncated/extra data,
+missing optional logs, mid-stream failures, invalid devices, sequential short
+reads, empty resources, and multi-buffer real-file verification.

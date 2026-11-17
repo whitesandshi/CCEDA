@@ -221,6 +221,8 @@ recomputes. The Controller now commits a quality-valid mesh through
 - [ ] Persist current mesh settings, reports, and accepted quality results.
   - [x] Implement and test the versioned mesh/settings.json entry codec.
   - [x] Add committed mesh/quality.json storage with independent recomputation and paired meshbin tests.
+  - [x] Add deterministic manifest JSON with bounded safe logical paths and entry hashes.
+  - [x] Add streaming package-resource integrity checks, feature compatibility gates, and total-size budgets.
   - [ ] Integrate settings with consistent project snapshots and package Save/Open.
 
 ## Risks and Mitigations

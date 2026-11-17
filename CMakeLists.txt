@@ -53,8 +53,20 @@ target_link_libraries(cceda_mesh_quality PUBLIC cceda_domain)
 
 add_library(cceda_project_settings STATIC
     src/persistence/MeshSettingsJson.cpp
-    src/persistence/MeshSettingsJson.h)
+    src/persistence/MeshSettingsJson.h
+    src/persistence/ProjectManifestJson.cpp
+    src/persistence/ProjectManifestJson.h)
 target_link_libraries(cceda_project_settings PUBLIC Qt6::Core cceda_domain)
+
+add_library(cceda_project_resources STATIC
+    src/persistence/ProjectResourceVerification.cpp
+    src/persistence/ProjectResourceVerification.h)
+target_link_libraries(cceda_project_resources PUBLIC cceda_project_settings)
+if(MSVC)
+    target_compile_options(cceda_project_settings PRIVATE /utf-8 /W4)
+    target_compile_options(cceda_project_resources PRIVATE /utf-8 /W4)
+endif()
+set_target_properties(cceda_project_settings cceda_project_resources PROPERTIES FOLDER "Libraries")
 
 add_library(cceda_mesh_gmsh STATIC
     src/meshing/GmshMsh41Reader.cpp)
@@ -404,6 +416,22 @@ if(BUILD_TESTING)
     add_executable(cceda_project_quality_tests tests/ProjectMeshQualityTests.cpp)
     target_link_libraries(cceda_project_quality_tests PRIVATE cceda_project_quality cceda_mesh_codec)
     add_test(NAME persistence.mesh_quality COMMAND cceda_project_quality_tests)
+
+    add_executable(cceda_project_manifest_tests tests/ProjectManifestJsonTests.cpp)
+    target_link_libraries(cceda_project_manifest_tests PRIVATE cceda_project_settings)
+    add_test(NAME persistence.project_manifest COMMAND cceda_project_manifest_tests)
+
+    add_executable(cceda_project_resource_tests tests/ProjectResourceVerificationTests.cpp)
+    target_link_libraries(cceda_project_resource_tests PRIVATE cceda_project_resources)
+    add_test(NAME persistence.project_resources COMMAND cceda_project_resource_tests)
+    set_tests_properties(persistence.project_manifest persistence.project_resources PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+    set_target_properties(cceda_project_manifest_tests cceda_project_resource_tests PROPERTIES FOLDER "Tests")
+    if(MSVC)
+        target_compile_options(cceda_project_manifest_tests PRIVATE /utf-8 /W4)
+        target_compile_options(cceda_project_resource_tests PRIVATE /utf-8 /W4)
+    endif()
 
     add_executable(cceda_mesh_quality_coloring_tests
         tests/MeshQualityColoringTests.cpp)
