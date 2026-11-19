@@ -78,6 +78,7 @@ void MainWindow::exportCurrentMeshDialog()
 {
   if (meshExportController_ == nullptr
     || meshExportController_->isRunning()
+    || projectProgress_ || importProgress_ || meshingActive_
     || !projectState_.canExportMesh())
   {
     return;
@@ -165,6 +166,7 @@ void MainWindow::meshExportFinished(
 
 void MainWindow::updateMeshExportAction()
 {
+  updateProjectActions();
   if (exportMeshAction_ == nullptr)
   {
     return;
@@ -172,7 +174,7 @@ void MainWindow::updateMeshExportAction()
   exportMeshAction_->setEnabled(projectState_.canExportMesh()
     && meshExportController_ != nullptr
     && !meshExportController_->isRunning()
-    && !importWatcher_.isRunning()
+    && !importProgress_ && !projectProgress_
     && !meshingActive_);
 }
 }

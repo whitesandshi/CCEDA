@@ -104,4 +104,20 @@ bool ProjectState::commitMesh(MeshModel workerMesh)
   meshState_ = MeshState::Ready;
   return true;
 }
+
+bool ProjectState::restore(GeometryRevision geometryRevision, MeshRevision lastMeshRevision,
+  std::shared_ptr<const MeshModel> mesh) noexcept
+{
+  if (!isOwnerThread() || (geometryRevision == 0 && lastMeshRevision != 0)
+    || (mesh && (lastMeshRevision == 0 || mesh->meshRevision != lastMeshRevision
+      || mesh->sourceGeometryRevision != geometryRevision)))
+  {
+    return false;
+  }
+  geometryRevision_ = geometryRevision;
+  meshRevision_ = lastMeshRevision;
+  meshState_ = mesh ? MeshState::Ready : MeshState::Missing;
+  currentMesh_ = std::move(mesh);
+  return true;
+}
 }

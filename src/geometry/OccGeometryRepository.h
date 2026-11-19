@@ -41,6 +41,12 @@ struct OccTopologySnapshot
   std::unordered_map<std::string, TopoDS_Shape> topologyShapes;
 };
 
+struct OccGeometryDocumentSnapshot
+{
+  occ::handle<TDocStd_Document> xcaf;
+  domain::GeometryDocument document;
+};
+
 class OccGeometryRepository
 {
 public:
@@ -51,6 +57,8 @@ public:
                std::unordered_map<std::string, TopoDS_Shape> topologyShapes);
 
   [[nodiscard]] domain::GeometryDocument domainDocument() const;
+  [[nodiscard]] OccGeometryDocumentSnapshot xcafDocument(
+    domain::GeometryRevision revision) const;
   [[nodiscard]] std::vector<OccShapeRecord> displayShapes() const;
   [[nodiscard]] OccShapeLookupResult lookupTopologyShape(
     domain::GeometryRevision revision,

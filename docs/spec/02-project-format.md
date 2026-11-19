@@ -181,8 +181,7 @@ Incremental/autosave logs, multiple mesh versions, external resources, cloud col
 
 The implemented `cceda_project_settings` adapter encodes and decodes the logical
 `mesh/settings.json` entry as UTF-8 JSON. Its byte API returns a complete typed
-value or a typed error. File I/O and project-state application belong to the
-future package transaction.
+value or a typed error. The package transaction applies the decoded settings after successful open.
 
 Every field below is required. All objects have exactly the listed members.
 
@@ -211,8 +210,7 @@ value and emit deterministic compact JSON with all fields present.
 
 Acceptance covers all-field roundtrip, exact large memory limits, explicit
 zero/disabled settings, deterministic re-encoding, and rejection of malformed
-or incompatible data without returning partial settings. Full ZIP packaging,
-geometry persistence, and workbench project Save/Open remain pending.
+or incompatible data without returning partial settings. Section 21 covers ZIP packaging and workbench use.
 
 ## 17. Committed Mesh Quality Entry Version 0.1
 
@@ -242,8 +240,7 @@ arrays. Default output/input and issue budgets reuse 16 MiB and 100,000 issues.
 
 This module validates quality consistency. The package transaction must also
 verify mesh and quality entry hashes, geometry mappings, and the current geometry
-revision before applying either entry to live project state. Threshold policies
-and package Save/Open integration remain pending.
+revision before applying either entry to live project state. Threshold policy persistence remains pending.
 
 Acceptance includes paired meshbin/quality roundtrip, exact committed revisions,
 preserved accepted warning IDs and reconstructed details, rejection of modified
@@ -280,8 +277,7 @@ compact JSON. The manifest does not hash itself. Package transactions write
 `manifest.json` last after all resource hashes have been computed.
 
 The manifest codec covers bytes and validation. Resource integrity and ZIP
-container I/O are provided by the following adapters. Resource decoding and
-atomic package Save/Open integration remain pending.
+container I/O are provided by the following adapters. Section 21 covers resource decoding and atomic Save/Open.
 
 ## 19. Streaming Project Resource Verification
 
@@ -309,9 +305,8 @@ distinguish absence from I/O failure. It owns container validation, duplicate
 archive names, compression-ratio limits, link handling, and safe resource lookup.
 Logical names must not be resolved directly against an untrusted filesystem
 directory. This verifier neither extracts resources nor changes project state.
-Payload decoding, project-ID/reference checks, exact geometry/mesh revision
-checks, optional undo-snapshot recovery, and atomic Save/Open integration
-remain separate pending work. Until undo recovery is implemented, declared
+Section 21 covers payload decoding, identity, exact revision checks, and
+atomic Save/Open. Optional undo-snapshot recovery remains pending. Until undo recovery is implemented, declared
 snapshot corruption is conservatively rejected.
 
 Acceptance covers required declarations, resource pairs, unsupported features,
@@ -363,10 +358,9 @@ cleanup never re-resolves a path that another process could replace. Existing
 files are never overwritten. A save requires every declared resource, including
 logs; an open retains the verifier's missing-optional-log warnings.
 
-This is the container layer. Capturing a consistent live project snapshot,
-encoding `project.json`/XCAF, checking domain identity and revisions on restore,
-atomically replacing an existing project, and clearing its dirty flag are still
-pending. No project Save/Open command is exposed by this increment.
+The package transaction can also flush and replace the destination by the
+still-owned staging handle after verification. The destination and staging
+file share a directory. Failure preserves the previous destination.
 
 Acceptance includes compressed/stored roundtrip, Unicode names, empty resources,
 retained stream lifetime and file locks, failed-write cleanup, unchanged existing
@@ -375,3 +369,49 @@ tampered containers, and real ZIP64 offsets above 4 GiB using sparse fixtures.
 When Python is available, a standard-library interoperability test checks the
 writer's CRCs/hashes and reads Python-produced ZIP32/ZIP64 packages with both
 seekable output and sequential data descriptors.
+
+
+## 21. Workbench Project Snapshot Version 0.1
+
+Packages written by the workbench declare the required feature
+`project-snapshot-0.1`. The compact canonical `project.json` has schema
+`cceda.project-snapshot/0.1`, the manifest's `projectId`, `createdAt`, and
+`modifiedAt`, and the fields `geometryRevision`, `lastMeshRevision`, `source`,
+`geometry`, `mesh`, `settings`, and `healingHistory`. Revisions are exact
+nonnegative integers in the JSON safe-integer range. Zero geometry revision
+represents an empty project. The settings and healing-history fields name the
+fixed required resources.
+
+For imported geometry, `source` names the original STEP resource and contains
+its original basename, SHA-256, and recognized length-unit names and
+millimeters-per-unit factors. `geometry` names the canonical binary XCAF
+resource and records assembly and part IDs with XCAF occurrence paths,
+definition labels, parent IDs, names, surface colors, visibility, and local
+3 ¡Á 4 transforms. The XCAF document supplies the shape and assembly data.
+On open, the adapter reconstructs this map from the XCAF document. An empty
+project uses empty `source` and `geometry` objects. The current healing history
+uses canonical `{"operations":[],"schema":"cceda.healing-history/0.1"}`.
+
+`mesh` has state `ready` with both fixed mesh and quality resource references,
+or state `missing`. A stored mesh must match both exact revisions. Mesh regions
+must refer to meshable Solid IDs from the reconstructed geometry, element
+associations must belong to their regions, and nonempty node associations
+must belong to a mapped Solid. Stale meshes are omitted and their last
+assigned revision is retained. Opening recomputes the stored quality and
+rebuilds summaries and bounded issue details for the workbench.
+
+STEP import retains a private copy and digest of the exact bytes it imports.
+Save captures settings and immutable current mesh on the owner thread and
+serializes the matching XCAF revision in the background. Background save/open
+serializes with workbench import, meshing, and mesh presentation. Open prepares
+the complete geometry, mesh, settings, and quality before applying the project
+on the owner thread. Failed open leaves the live project intact. The workbench
+clears the dirty indicator after successful publication and asks about unsaved
+changes before replacement or close.
+
+The profile bounds metadata to 8 MiB, original STEP to 2 GiB, and XCAF to 1 GiB,
+with the existing ZIP, settings, mesh binary, and quality limits in effect.
+An unreadable XCAF yields a compatibility error. Nonempty healing history,
+undo snapshots, geometry validation reports, job history, and persisted
+quality-color thresholds require later slices. Log entries are optional and
+their absence is reported during open. Workbench log text is session-local.

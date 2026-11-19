@@ -23,9 +23,18 @@ CCEDA is a solver-neutral geometry and mesh preprocessor for Windows. Read docs/
 
 ## Build And Verify
 
-    cmake --preset vs2022-x64
-    cmake --build --preset release
-    ctest --preset release
+In PowerShell, use Visual Studio's bundled CMake when `cmake` and `ctest`
+are not on PATH:
+
+    $cmakeBin = 'D:\Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+    & "$cmakeBin\cmake.exe" --preset vs2022-x64
+    & "$cmakeBin\cmake.exe" --build --preset release
+    & "$cmakeBin\ctest.exe" --preset release
+
+Integration tests create job workspaces and temporary files. If a restricted
+sandbox prevents those writes, check the reported paths and permissions before
+attributing the failures to product code. A read-only `.git` also prevents
+commits; do not work around that restriction without authorization.
 
 The generated solution is build-vs2022/CCEDA.sln. Only Release | x64 is supported because the installed OCCT libraries are Release binaries.
 

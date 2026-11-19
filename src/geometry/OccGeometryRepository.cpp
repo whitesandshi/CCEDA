@@ -28,6 +28,14 @@ domain::GeometryDocument OccGeometryRepository::domainDocument() const
   return domainDocument_;
 }
 
+OccGeometryDocumentSnapshot OccGeometryRepository::xcafDocument(
+  domain::GeometryRevision revision) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return domainDocument_.revision == revision
+    ? OccGeometryDocumentSnapshot{document_, domainDocument_} : OccGeometryDocumentSnapshot{};
+}
+
 std::vector<OccShapeRecord> OccGeometryRepository::displayShapes() const
 {
   std::lock_guard<std::mutex> lock(mutex_);

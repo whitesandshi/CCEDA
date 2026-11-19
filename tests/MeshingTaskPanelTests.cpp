@@ -6,6 +6,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
@@ -212,6 +213,36 @@ int main(int argc, char* argv[])
              summary->text().contains("Verified output changed")
              && summary->text().contains("2 attempts"),
          "failure presents a concise terminal state and detail");
+
+  using namespace cceda::domain;
+  MeshGenerationSettings restored;
+  restored.minimumSizeMm = 0.012345678;
+  restored.maximumSizeMm = 5.5;
+  restored.algorithm = MeshGenerationAlgorithm::Hxt;
+  panel.applySettings(MeshGenerationMode::ConformalMultiRegion, restored,
+    MeshingResourceLimits{125432, 1048577}, MeshingRetryPolicy{true, 1});
+  expect(panel.settings().minimumSizeMm == restored.minimumSizeMm
+      && panel.settings().algorithm == MeshGenerationAlgorithm::Hxt
+      && panel.mode() == MeshGenerationMode::ConformalMultiRegion
+      && panel.resourceLimits().maximumElapsedMilliseconds == 125432
+      && panel.resourceLimits().maximumWorkingSetBytes == 1048577
+      && panel.retryPolicy().maximumAttempts == 1,
+    "restored settings retain their exact values behind rounded controls");
+  maximumMinutes->setValue(4);
+  expect(panel.resourceLimits().maximumElapsedMilliseconds == 240000
+      && panel.resourceLimits().maximumWorkingSetBytes == 1048577,
+    "editing a restored limit updates only its corresponding exact value");
+  auto* sizeEditor = maximum->findChild<QLineEdit*>();
+  if (sizeEditor) { sizeEditor->setText("6.25 mm"); }
+  expect(sizeEditor && panel.settings().maximumSizeMm == 5.5,
+    "uncommitted spin box input is pending before a save shortcut");
+  panel.commitSettingsEdits();
+  expect(panel.settings().maximumSizeMm == 6.25
+      && panel.settings().minimumSizeMm == restored.minimumSizeMm,
+    "save explicitly captures pending text and preserves other exact settings");
+  panel.resetTaskResult();
+  expect(progress->value() == 0 && summary->text().isEmpty(),
+    "opening a geometry-only project clears the previous task result");
 
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

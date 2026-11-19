@@ -112,4 +112,9 @@ struct MeshQualityJsonWriteResult
 [[nodiscard]] MeshQualityJsonReadResult readMeshQualityJson(
   QIODevice& input,
   const MeshQualityJsonLimits& limits = {});
+
+// Decodes the committed schema. Project persistence independently verifies
+// canonical bytes against the matching neutral mesh before using the result.
+[[nodiscard]] MeshQualityJsonReadResult readCommittedMeshQualityJson(
+  QIODevice& input, const MeshQualityJsonLimits& limits = {});
 }

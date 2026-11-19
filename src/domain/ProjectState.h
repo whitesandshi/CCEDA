@@ -48,6 +48,10 @@ public:
   void commitImportedGeometry();
   void commitGeometryChange();
   [[nodiscard]] bool commitMesh(MeshModel workerMesh);
+  // Applies a decoded project. A non-null mesh must already have passed
+  // committed mesh, quality, and geometry mapping validation off-thread.
+  [[nodiscard]] bool restore(GeometryRevision geometryRevision, MeshRevision lastMeshRevision,
+    std::shared_ptr<const MeshModel> mesh) noexcept;
 
 private:
   [[nodiscard]] bool hasExportableCurrentMesh() const noexcept;
@@ -55,7 +59,7 @@ private:
   GeometryRevision geometryRevision_ = 0;
   MeshRevision meshRevision_ = 0;
   MeshState meshState_ = MeshState::Missing;
-  std::shared_ptr<MeshModel> currentMesh_;
+  std::shared_ptr<const MeshModel> currentMesh_;
   std::thread::id ownerThread_ = std::this_thread::get_id();
 };
 }

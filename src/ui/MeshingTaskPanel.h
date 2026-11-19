@@ -28,6 +28,14 @@ public:
 
   void setGeometryAvailable(bool available);
   void setGenerationBlocked(bool blocked);
+  void commitSettingsEdits();
+  void applySettings(domain::MeshGenerationMode mode,
+    const domain::MeshGenerationSettings& settings,
+    const domain::MeshingResourceLimits& limits,
+    const domain::MeshingRetryPolicy& retry);
+  void resetTaskResult();
+  void showRestoredMesh(const domain::MeshModel& mesh,
+    const application::AcceptedMeshQuality& quality);
   [[nodiscard]] domain::MeshGenerationSettings settings() const noexcept;
   [[nodiscard]] domain::MeshGenerationMode mode() const noexcept;
   [[nodiscard]] domain::MeshingResourceLimits resourceLimits() const noexcept;
@@ -44,6 +52,7 @@ public:
 signals:
   void generateRequested();
   void cancelRequested();
+  void settingsChanged();
 
 private:
   void setBusy(bool busy);
@@ -53,6 +62,10 @@ private:
   bool geometryAvailable_ = false;
   bool generationBlocked_ = false;
   bool busy_ = false;
+  std::optional<double> restoredMinimum_;
+  std::optional<double> restoredMaximum_;
+  std::optional<std::uint64_t> restoredElapsedLimit_;
+  std::optional<std::uint64_t> restoredMemoryLimit_;
   QDoubleSpinBox* minimumSize_ = nullptr;
   QDoubleSpinBox* maximumSize_ = nullptr;
   QComboBox* mode_ = nullptr;

@@ -1,7 +1,8 @@
 #pragma once
 
-#include "domain/ProjectState.h"
+#include "domain/Revisions.h"
 
+#include <array>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -47,6 +48,24 @@ struct GeometryEntity
 
 struct GeometryDocument
 {
+  struct LabelBinding
+  {
+    std::string geometryId;
+    std::string instancePath;
+    std::string definitionLabel;
+    std::string parentGeometryId;
+    std::string name;
+    GeometryColor color;
+    bool visible = true;
+    std::array<double, 12> localTransform{};
+  };
+
+  struct SourceLengthUnit
+  {
+    std::string name;
+    double millimetersPerUnit = 0.0;
+  };
+
   GeometryRevision revision = 0;
   std::string sourceName;
   std::vector<GeometryEntity> entities;
@@ -54,6 +73,8 @@ struct GeometryDocument
   std::size_t faceCount = 0;
   std::size_t edgeCount = 0;
   std::size_t vertexCount = 0;
+  std::vector<LabelBinding> xcafLabels;
+  std::vector<SourceLengthUnit> sourceLengthUnits;
 };
 
 struct GeometryImportResult

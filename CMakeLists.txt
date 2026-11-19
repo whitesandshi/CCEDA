@@ -138,6 +138,7 @@ target_link_libraries(cceda_meshing_worker_client
     PRIVATE cceda_meshing_protocol)
 
 add_library(cceda_application STATIC
+    src/application/AcceptedMeshQuality.cpp
     src/application/IMeshExporter.h
     src/application/IStagedFilePublisher.h
     src/application/MeshExportJobController.cpp
@@ -154,6 +155,14 @@ target_link_libraries(cceda_application
     PRIVATE Qt6::Concurrent cceda_meshing_worker_client
         cceda_meshing_protocol cceda_mesh_quality_json)
 
+add_library(cceda_project_package STATIC src/persistence/ProjectPackage.cpp)
+target_link_libraries(cceda_project_package PUBLIC cceda_application cceda_project_settings
+    PRIVATE cceda_project_zip cceda_project_quality)
+set_target_properties(cceda_project_package PROPERTIES FOLDER "Libraries")
+if(MSVC)
+    target_compile_options(cceda_project_package PRIVATE /utf-8 /W4)
+endif()
+
 add_library(cceda_platform_windows STATIC
     src/platform/WindowsStagedFilePublisher.cpp
     src/platform/WindowsStagedFilePublisher.h)
@@ -168,7 +177,7 @@ add_library(cceda_geometry_occ STATIC
 target_include_directories(cceda_geometry_occ PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_geometry_occ
     PUBLIC cceda_domain
-    PRIVATE Qt6::Core TKDESTEP TKXCAF TKVCAF TKCAF TKLCAF TKCDF TKBRep TKTopAlgo TKG3d TKGeomBase TKMath TKernel)
+    PRIVATE Qt6::Core TKDESTEP TKBinXCAF TKXCAF TKVCAF TKCAF TKLCAF TKCDF TKBRep TKTopAlgo TKG3d TKGeomBase TKMath TKernel)
 set_property(TARGET cceda_geometry_occ PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(cceda_visualization_occ STATIC
@@ -215,6 +224,7 @@ qt_add_executable(CCEDA
     src/ui/MainWindow.cpp
     src/ui/MainWindowMeshExport.cpp
     src/ui/MainWindowMeshing.cpp
+    src/ui/MainWindowProject.cpp
     src/ui/MainWindow.h
     src/ui/OccViewportWidget.cpp
     src/ui/OccViewportWidget.h)
@@ -226,6 +236,7 @@ target_link_libraries(CCEDA PRIVATE
     cceda_geometry_occ
     cceda_mesh_export_gmsh
     cceda_platform_windows
+    cceda_project_package
     cceda_visualization_occ)
 target_compile_definitions(CCEDA PRIVATE
     UNICODE
@@ -562,6 +573,14 @@ if(BUILD_TESTING)
         TIMEOUT 90
         LABELS "integration;application;meshing"
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
+    add_executable(cceda_project_package_tests tests/ProjectPackageTests.cpp)
+    target_link_libraries(cceda_project_package_tests PRIVATE cceda_project_package
+        cceda_project_zip cceda_geometry_occ TKDESTEP TKXCAF TKPrim TKBRep)
+    add_test(NAME persistence.project_package COMMAND cceda_project_package_tests
+        "D:/Projects/OpenCASCADE-8.0.0/install/data/step/screw.step")
+    set_tests_properties(persistence.project_package PROPERTIES TIMEOUT 30
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin;PATH=path_list_prepend:${OpenCASCADE_BINARY_DIR}")
 
     add_executable(cceda_geometry_import_tests tests/GeometryImportTests.cpp)
     target_link_libraries(cceda_geometry_import_tests PRIVATE

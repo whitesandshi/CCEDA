@@ -68,6 +68,7 @@ QString yesNo(bool value)
 namespace cceda::ui
 {
 MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryService,
+                       std::shared_ptr<geometry::IProjectGeometryStorage> geometryStorage,
                        std::shared_ptr<geometry::IGeometrySnapshotService> snapshotService,
                        std::shared_ptr<visualization::IViewportController> viewportController,
                        application::MeshingRuntimeConfiguration meshingConfiguration,
@@ -75,12 +76,14 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
                        std::shared_ptr<application::IStagedFilePublisher> filePublisher,
                        QWidget* parent)
     : QMainWindow(parent), geometryService_(std::move(geometryService)),
+      geometryStorage_(std::move(geometryStorage)),
       snapshotService_(std::move(snapshotService)),
       viewportController_(std::move(viewportController)),
-      meshingConfiguration_(std::move(meshingConfiguration))
+      meshingConfiguration_(std::move(meshingConfiguration)),
+      projectIdentity_(persistence::newProjectIdentity())
 {
   setObjectName("ccedaMainWindow");
-  setWindowTitle("CCEDA Workbench");
+  setProjectDirty(false);
   resize(1320, 840);
 
   viewport_ = new OccViewportWidget(viewportController_, this);
@@ -93,8 +96,14 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
 
   meshingController_ = std::make_unique<application::MeshingJobController>(
       projectState_, meshingConfiguration_, this);
-  connect(&importWatcher_, &QFutureWatcher<domain::GeometryImportResult>::finished, this,
+  connect(&importWatcher_, &QFutureWatcher<persistence::ProjectImportResult>::finished, this,
           [this] { importFinished(); });
+  connect(&projectOpenWatcher_, &QFutureWatcher<persistence::ProjectOpenResult>::finished,
+          this, [this] { projectOpened(); });
+  connect(&projectSaveWatcher_, &QFutureWatcher<QString>::finished,
+          this, [this] { projectSaved(); });
+  connect(meshingPanel_, &MeshingTaskPanel::settingsChanged,
+          this, [this] { setProjectDirty(true); });
   connect(&snapshotWatcher_, &QFutureWatcher<geometry::GeometrySnapshotResult>::finished, this,
           [this] { snapshotFinished(); });
   connect(&meshPresentationWatcher_,
@@ -141,8 +150,8 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
   connect(qualityPanel_, &QualityInspectionPanel::coloringRequested, this,
           [this](domain::MeshRevision revision) {
             const auto mesh = projectState_.currentMeshHandle();
-            if (!meshingActive_ && !importWatcher_.isRunning()
-              && !meshPresentationWatcher_.isRunning()
+            if (!meshingActive_ && !importProgress_ && !projectProgress_
+              && !meshPresentationPending_
               && projectState_.meshState() == domain::MeshState::Ready
               && mesh && mesh->meshRevision == revision
               && mesh->sourceGeometryRevision == projectState_.geometryRevision())
@@ -158,6 +167,8 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
 
 MainWindow::~MainWindow()
 {
+  projectOpenWatcher_.waitForFinished();
+  projectSaveWatcher_.waitForFinished();
   if (meshPresentationWatcher_.isRunning())
   {
     meshPresentationWatcher_.waitForFinished();
@@ -175,11 +186,23 @@ MainWindow::~MainWindow()
 
 void MainWindow::createActions()
 {
-  QAction* openAction =
-      new QAction(style()->standardIcon(QStyle::SP_DialogOpenButton), "Open STEP...", this);
-  openAction->setShortcut(QKeySequence::Open);
-  openAction->setToolTip("Open a STEP model");
-  connect(openAction, &QAction::triggered, this, [this] { openStepDialog(); });
+  openProjectAction_ = new QAction(style()->standardIcon(QStyle::SP_DialogOpenButton),
+    tr("Open Project..."), this);
+  openProjectAction_->setObjectName("openProjectAction");
+  openProjectAction_->setShortcut(QKeySequence::Open);
+  connect(openProjectAction_, &QAction::triggered, this, [this] { openProjectDialog(); });
+  importStepAction_ = new QAction(tr("Import STEP..."), this);
+  importStepAction_->setObjectName("importStepAction");
+  connect(importStepAction_, &QAction::triggered, this, [this] { openStepDialog(); });
+  saveProjectAction_ = new QAction(style()->standardIcon(QStyle::SP_DialogSaveButton),
+    tr("Save Project"), this);
+  saveProjectAction_->setObjectName("saveProjectAction");
+  saveProjectAction_->setShortcut(QKeySequence::Save);
+  connect(saveProjectAction_, &QAction::triggered, this, [this] { startProjectSave(false); });
+  saveProjectAsAction_ = new QAction(tr("Save Project As..."), this);
+  saveProjectAsAction_->setObjectName("saveProjectAsAction");
+  saveProjectAsAction_->setShortcut(QKeySequence::SaveAs);
+  connect(saveProjectAsAction_, &QAction::triggered, this, [this] { startProjectSave(true); });
 
   QAction* fitAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), "Fit", this);
   fitAction->setShortcut(Qt::Key_F);
@@ -227,7 +250,11 @@ void MainWindow::createActions()
   connect(exitAction, &QAction::triggered, this, &QWidget::close);
 
   QMenu* fileMenu = menuBar()->addMenu("File");
-  fileMenu->addAction(openAction);
+  fileMenu->addAction(openProjectAction_);
+  fileMenu->addAction(saveProjectAction_);
+  fileMenu->addAction(saveProjectAsAction_);
+  fileMenu->addSeparator();
+  fileMenu->addAction(importStepAction_);
   fileMenu->addAction(exportMeshAction_);
   fileMenu->addSeparator();
   fileMenu->addAction(exitAction);
@@ -247,7 +274,9 @@ void MainWindow::createActions()
   QToolBar* toolbar = addToolBar("Main");
   toolbar->setObjectName("mainToolbar");
   toolbar->setMovable(false);
-  toolbar->addAction(openAction);
+  toolbar->addAction(openProjectAction_);
+  toolbar->addAction(saveProjectAction_);
+  toolbar->addAction(importStepAction_);
   toolbar->addSeparator();
   toolbar->addAction(fitAction);
   toolbar->addAction(isometricAction);
@@ -340,11 +369,14 @@ void MainWindow::openStepDialog()
 
 void MainWindow::openStepPath(const QString& path)
 {
-  if (path.isEmpty() || importWatcher_.isRunning() || meshingActive_)
+  if (!path.isEmpty() && projectCommandsAvailable())
   {
-    return;
+    confirmProjectReplacement([this, path] { startStepImport(path); });
   }
+}
 
+void MainWindow::startStepImport(const QString& path)
+{
   generateMeshAction_->setEnabled(false);
   meshingPanel_->setGeometryAvailable(false);
   importProgress_ = new QProgressDialog("Importing STEP model...", QString(), 0, 0, this);
@@ -357,9 +389,13 @@ void MainWindow::openStepPath(const QString& path)
   appendLog("Import started: " + path);
 
   const auto service = geometryService_;
-  const std::filesystem::path nativePath(path.toStdWString());
-  importWatcher_.setFuture(
-      QtConcurrent::run([service, nativePath] { return service->importStep(nativePath); }));
+  importWatcher_.setFuture(QtConcurrent::run([service, path] {
+    try { return persistence::importProjectStep(path, *service); }
+    catch (...) {
+      return persistence::ProjectImportResult{{false, {}, "GEOMETRY_IMPORT_FAILED",
+        "The STEP model could not be imported."}, {}};
+    }
+  }));
   updateMeshExportAction();
 }
 
@@ -372,7 +408,8 @@ void MainWindow::importFinished()
     importProgress_ = nullptr;
   }
 
-  const domain::GeometryImportResult result = importWatcher_.result();
+  auto imported = importWatcher_.future().takeResult();
+  const auto& result = imported.geometry;
   if (!result.success)
   {
     statusBar()->showMessage("STEP import failed");
@@ -385,23 +422,18 @@ void MainWindow::importFinished()
     return;
   }
 
-  document_ = result.document;
+  document_ = std::move(imported.geometry.document);
   projectState_.commitImportedGeometry();
-  qualityPanel_->clearQuality();
-  meshIssueElementIds_.clear();
-  populateModel(document_);
-  const bool meshable = hasMeshableGeometry();
-  meshSurfaceAction_->setChecked(false);
-  meshSurfaceAction_->setEnabled(false);
-  viewportController_->displayCurrentGeometry();
-  setWindowTitle(QString::fromStdString(document_.sourceName) + " - CCEDA Workbench");
+  projectSource_ = std::move(imported.source);
+  projectIdentity_ = persistence::newProjectIdentity();
+  projectPath_.clear();
+  displayProjectGeometry();
+  setProjectDirty(true);
   statusBar()->showMessage(
       QString("Loaded %1 solid(s), %2 face(s)").arg(document_.solidCount).arg(document_.faceCount));
   appendLog(QString("Import completed: %1 entities, geometry revision %2")
                 .arg(document_.entities.size())
                 .arg(document_.revision));
-  meshingPanel_->setGeometryAvailable(meshable);
-  generateMeshAction_->setEnabled(meshable);
   updateMeshExportAction();
 }
 

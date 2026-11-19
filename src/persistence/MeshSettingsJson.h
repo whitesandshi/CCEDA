@@ -9,7 +9,7 @@
 
 namespace cceda::persistence
 {
-// Logical contents of mesh/settings.json in a future project package.
+// Logical contents of mesh/settings.json in a project package.
 struct StoredMeshSettings
 {
   domain::MeshGenerationMode mode = domain::MeshGenerationMode::IndependentSolids;

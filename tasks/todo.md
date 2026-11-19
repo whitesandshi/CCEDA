@@ -177,4 +177,5 @@
 - [x] Add the pinned miniz ZIP32/ZIP64 adapter with bounded directory parsing and streaming resources.
 - [x] Add exclusively owned staging writes, source revalidation, reopen verification, and handle-based cleanup.
 - [x] Test hostile containers, file locks, source changes, true 64-bit offsets, and Python ZIP interoperability.
-- [ ] Integrate settings with consistent project snapshots and package Save/Open.
+- [x] Integrate settings with consistent project snapshots and package Save/Open.
+- [x] Verify desktop import, mesh, save, reopen without the external STEP, remesh, and resave.

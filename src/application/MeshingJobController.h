@@ -4,7 +4,7 @@
 #include "domain/MeshGenerationSettings.h"
 #include "domain/MeshingResourceLimits.h"
 #include "domain/MeshingRetryPolicy.h"
-#include "mesh_quality/MeshQuality.h"
+#include "application/AcceptedMeshQuality.h"
 
 #include <QObject>
 #include <QString>
@@ -48,41 +48,6 @@ struct MeshingJobProgress
   std::uint64_t workingSetBytes = 0;
   std::uint32_t attemptNumber = 1;
   std::uint32_t maximumAttempts = 1;
-};
-
-struct AcceptedMeshQualityNumericSummary
-{
-  mesh_quality::MeshQualityMetric metric =
-    mesh_quality::MeshQualityMetric::TriangleArea;
-  std::uint64_t sampleCount = 0;
-  std::optional<double> minimum;
-  std::optional<double> maximum;
-  std::optional<double> mean;
-};
-
-struct AcceptedMeshQualityBooleanSummary
-{
-  mesh_quality::MeshQualityMetric metric =
-    mesh_quality::MeshQualityMetric::TriangleNormalConsistent;
-  std::uint64_t sampleCount = 0;
-  std::uint64_t failedElementCount = 0;
-};
-
-// A bounded, immutable view of the quality result accepted for one exact
-// committed mesh revision. Full per-element metric arrays remain
-// evaluator-local; only unique issue element details are retained.
-struct AcceptedMeshQuality
-{
-  domain::MeshRevision meshRevision = 0;
-  domain::GeometryRevision sourceGeometryRevision = 0;
-  QString metricVersion;
-  bool validForCommit = false;
-  std::uint64_t triangleCount = 0;
-  std::uint64_t tetrahedronCount = 0;
-  std::vector<AcceptedMeshQualityNumericSummary> numericSummaries;
-  AcceptedMeshQualityBooleanSummary booleanSummary;
-  std::vector<mesh_quality::MeshQualityIssue> issues;
-  mesh_quality::MeshQualityIssueDetails issueElementDetails;
 };
 
 struct ExperimentalMeshingJobResult

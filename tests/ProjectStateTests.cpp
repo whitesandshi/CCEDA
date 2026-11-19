@@ -163,6 +163,21 @@ int main()
       && state.isCurrentMeshExportSnapshot(*secondExportSnapshot),
     "a rejected replacement preserves the current export snapshot");
 
+  MeshModel restoredMesh = makeWorkerMesh(12);
+  restoredMesh.meshRevision = 8;
+  auto restoredHandle = std::make_shared<const MeshModel>(std::move(restoredMesh));
+  expect(!state.restore(11, 8, restoredHandle) && state.currentMeshHandle() == secondMesh,
+    "a stored mesh from another geometry revision leaves the live state unchanged");
+  expect(state.restore(12, 8, restoredHandle) && state.canExportMesh()
+      && state.currentMeshHandle() == restoredHandle,
+    "opening restores the exact committed mesh and revision");
+  expect(state.commitMesh(makeWorkerMesh(12)) && state.meshRevision() == 9,
+    "remeshing advances the restored mesh revision");
+  expect(state.restore(13, 9, {}) && state.meshState() == MeshState::Missing
+      && !state.currentMeshHandle() && state.commitMesh(makeWorkerMesh(13))
+      && state.meshRevision() == 10,
+    "a geometry-only snapshot retains the mesh revision counter");
+
   if (failures == 0)
   {
     std::cout << "All ProjectState tests passed.\n";

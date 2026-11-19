@@ -4,9 +4,18 @@
 
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BinXCAFDrivers_DocumentRetrievalDriver.hxx>
+#include <BinXCAFDrivers_DocumentStorageDriver.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <PCDM_ReadWriter.hxx>
 #include <STEPCAFControl_Reader.hxx>
+#include <STEPConstruct_UnitContext.hxx>
+#include <Standard_Version.hxx>
+#include <StepBasic_ConversionBasedUnitAndLengthUnit.hxx>
+#include <StepBasic_SiUnitAndLengthUnit.hxx>
+#include <StepData_StepModel.hxx>
+#include <TDF_Tool.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TDataStd_Name.hxx>
@@ -14,13 +23,17 @@
 #include <TopExp.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
-#include <XCAFApp_Application.hxx>
+#include <UnitsMethods.hxx>
+#include <TDocStd_Application.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <set>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -244,6 +257,120 @@ void appendTopologyEntities(domain::GeometryDocument& document,
     topologyShapes.emplace(id, vertex);
   }
 }
+
+struct OccPreparedGeometry final : cceda::geometry::PreparedProjectGeometry
+{
+  occ::handle<TDocStd_Document> xcaf;
+  std::vector<cceda::geometry::OccShapeRecord> records;
+  std::unordered_map<std::string, TopoDS_Shape> topologyShapes;
+};
+
+std::shared_ptr<OccPreparedGeometry> describeDocument(
+  const occ::handle<TDocStd_Document>& document, domain::GeometryRevision revision,
+  const std::string& sourceName)
+{
+  using cceda::geometry::OccShapeRecord;
+  auto prepared = std::make_shared<OccPreparedGeometry>();
+  prepared->xcaf = document;
+  auto& domainDocument = prepared->document;
+  domainDocument.revision = revision;
+  domainDocument.sourceName = sourceName;
+
+  std::vector<std::string> idsByDepth;
+  std::size_t nodeIndex = 0;
+  for (XCAFPrs_DocumentExplorer explorer(document, XCAFPrs_DocumentExplorerFlags_None);
+       explorer.More(); explorer.Next(), ++nodeIndex)
+  {
+    const XCAFPrs_DocumentNode& node = explorer.Current();
+    const int depth = std::max(0, explorer.CurrentDepth());
+    if (idsByDepth.size() <= static_cast<std::size_t>(depth))
+    {
+      idsByDepth.resize(static_cast<std::size_t>(depth) + 1);
+    }
+    const std::string parentId = depth > 0 ? idsByDepth[static_cast<std::size_t>(depth - 1)]
+                                           : std::string();
+    idsByDepth[static_cast<std::size_t>(depth)] = node.Id.ToCString();
+
+    TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(node.RefLabel);
+    if (!shape.IsNull())
+    {
+      shape.Location(node.Location);
+    }
+
+    GeometryEntity entity = makeEntity(node, shape, parentId, nodeIndex);
+    domainDocument.entities.push_back(entity);
+    TCollection_AsciiString definitionLabel;
+    TDF_Tool::Entry(node.RefLabel, definitionLabel);
+    domain::GeometryDocument::LabelBinding binding{entity.id, node.Id.ToCString(),
+      definitionLabel.ToCString(), parentId, entity.name, entity.color, node.Style.IsVisible()};
+    const gp_Trsf transform = node.LocalTrsf.Transformation();
+    for (int row = 1; row <= 3; ++row)
+    {
+      for (int column = 1; column <= 4; ++column)
+      {
+        binding.localTransform[static_cast<std::size_t>((row - 1) * 4 + (column - 1))] =
+          transform.Value(row, column);
+      }
+    }
+    domainDocument.xcafLabels.push_back(std::move(binding));
+
+    if (!node.IsAssembly && !shape.IsNull())
+    {
+      domainDocument.solidCount += entity.solidCount;
+      domainDocument.faceCount += entity.faceCount;
+      domainDocument.edgeCount += entity.edgeCount;
+      domainDocument.vertexCount += entity.vertexCount;
+      appendTopologyEntities(domainDocument, entity, shape, prepared->topologyShapes);
+
+      OccShapeRecord record;
+      record.id = entity.id;
+      record.shape = shape;
+      record.color = Quantity_Color(
+        entity.color.red, entity.color.green, entity.color.blue, Quantity_TOC_sRGB);
+      prepared->records.push_back(std::move(record));
+    }
+  }
+
+  return prepared->records.empty() ? nullptr : prepared;
+}
+
+std::vector<domain::GeometryDocument::SourceLengthUnit> sourceUnits(STEPControl_Reader& reader)
+{
+  std::set<std::pair<std::string, double>> units;
+  const auto model = reader.StepModel();
+  StepData_Factors factors;
+  factors.SetCascadeUnit(1.0);
+  for (int index = 1; index <= model->NbEntities(); ++index)
+  {
+    const auto entity = model->Value(index);
+    const auto si = occ::down_cast<StepBasic_SiUnitAndLengthUnit>(entity);
+    const auto conversion = occ::down_cast<StepBasic_ConversionBasedUnitAndLengthUnit>(entity);
+    if (si.IsNull() && conversion.IsNull())
+    {
+      continue;
+    }
+    STEPConstruct_UnitContext context;
+    const auto named = occ::down_cast<StepBasic_NamedUnit>(entity);
+    if (context.ComputeFactors(named, factors) != 0 || !context.LengthDone()
+      || !std::isfinite(context.LengthFactor()) || context.LengthFactor() <= 0.0)
+    {
+      continue;
+    }
+    const char* name = UnitsMethods::DumpLengthUnit(context.LengthFactor());
+    if (!conversion.IsNull() && !conversion->Name().IsNull() && !conversion->Name()->String().IsEmpty())
+    {
+      name = conversion->Name()->ToCString();
+    }
+    if (!name || !*name) { name = "SI metre (scaled)"; }
+    units.emplace(name, context.LengthFactor());
+  }
+  std::vector<domain::GeometryDocument::SourceLengthUnit> result;
+  for (const auto& [name, scale] : units)
+  {
+    result.push_back({name, scale});
+  }
+  return result;
+}
 }
 
 namespace cceda::geometry
@@ -253,7 +380,8 @@ OccGeometryService::OccGeometryService(std::shared_ptr<OccGeometryRepository> re
 {
 }
 
-domain::GeometryImportResult OccGeometryService::importStep(const std::filesystem::path& path)
+domain::GeometryImportResult OccGeometryService::importStep(const std::filesystem::path& path,
+  const std::string& sourceName)
 {
   domain::GeometryImportResult result;
   if (!std::filesystem::is_regular_file(path))
@@ -265,8 +393,10 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
 
   try
   {
-    occ::handle<TDocStd_Document> document;
-    XCAFApp_Application::GetApplication()->NewDocument("BinXCAF", document);
+    const occ::handle<TDocStd_Document> document = new TDocStd_Document("BinXCAF");
+    document->Open(new TDocStd_Application());
+    XCAFDoc_DocumentTool::Set(document->Main());
+    XCAFDoc_DocumentTool::SetLengthUnit(document, 1.0, UnitsMethods_LengthUnit_Millimeter);
 
     STEPCAFControl_Reader reader;
     reader.SetColorMode(true);
@@ -292,60 +422,18 @@ domain::GeometryImportResult OccGeometryService::importStep(const std::filesyste
     domainDocument.revision = repository_->nextRevision();
     domainDocument.sourceName = path.filename().u8string();
 
-    std::vector<OccShapeRecord> records;
-    std::unordered_map<std::string, TopoDS_Shape> topologyShapes;
-    std::vector<std::string> idsByDepth;
-    std::size_t nodeIndex = 0;
-    for (XCAFPrs_DocumentExplorer explorer(document, XCAFPrs_DocumentExplorerFlags_None);
-         explorer.More(); explorer.Next(), ++nodeIndex)
-    {
-      const XCAFPrs_DocumentNode& node = explorer.Current();
-      const int depth = std::max(0, explorer.CurrentDepth());
-      if (idsByDepth.size() <= static_cast<std::size_t>(depth))
-      {
-        idsByDepth.resize(static_cast<std::size_t>(depth) + 1);
-      }
-      const std::string parentId = depth > 0 ? idsByDepth[static_cast<std::size_t>(depth - 1)]
-                                             : std::string();
-      idsByDepth[static_cast<std::size_t>(depth)] = node.Id.ToCString();
-
-      TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(node.RefLabel);
-      if (!shape.IsNull())
-      {
-        shape.Location(node.Location);
-      }
-
-      GeometryEntity entity = makeEntity(node, shape, parentId, nodeIndex);
-      domainDocument.entities.push_back(entity);
-
-      if (!node.IsAssembly && !shape.IsNull())
-      {
-        domainDocument.solidCount += entity.solidCount;
-        domainDocument.faceCount += entity.faceCount;
-        domainDocument.edgeCount += entity.edgeCount;
-        domainDocument.vertexCount += entity.vertexCount;
-        appendTopologyEntities(domainDocument, entity, shape, topologyShapes);
-
-        OccShapeRecord record;
-        record.id = entity.id;
-        record.shape = shape;
-        record.color = Quantity_Color(
-          entity.color.red, entity.color.green, entity.color.blue, Quantity_TOC_sRGB);
-        records.push_back(std::move(record));
-      }
-    }
-
-    if (domainDocument.entities.empty() || records.empty())
+    auto prepared = describeDocument(document, repository_->nextRevision(),
+      sourceName.empty() ? path.filename().u8string() : sourceName);
+    if (!prepared)
     {
       result.errorCode = "GEOMETRY_NO_DISPLAYABLE_SHAPES";
       result.message = "The STEP file contains no displayable geometry.";
       return result;
     }
-
-    repository_->replace(
-      document, domainDocument, std::move(records), std::move(topologyShapes));
+    prepared->document.sourceLengthUnits = sourceUnits(reader.ChangeReader());
+    result.document = prepared->document;
+    activate(std::move(prepared));
     result.success = true;
-    result.document = std::move(domainDocument);
     return result;
   }
   catch (const Standard_Failure& failure)
@@ -365,6 +453,87 @@ std::shared_ptr<OccGeometryRepository> OccGeometryService::repository() const
 domain::GeometryDocument OccGeometryService::currentDocument() const
 {
   return repository_->domainDocument();
+}
+
+std::string OccGeometryService::writerVersion() const
+{
+  return OCC_VERSION_STRING_EXT;
+}
+
+std::optional<domain::GeometryDocument> OccGeometryService::writeXcaf(domain::GeometryRevision revision,
+  const std::filesystem::path& path) const
+{
+  try
+  {
+    auto snapshot = repository_->xcafDocument(revision);
+    std::ofstream stream(path, std::ios::binary);
+    if (snapshot.xcaf.IsNull() || !stream)
+    {
+      return {};
+    }
+    // Write the binary document without changing OCCT's saved flag or session.
+    BinXCAFDrivers_DocumentStorageDriver writer;
+    writer.SetFormat("BinXCAF");
+    writer.SetIsError(false);
+    writer.SetStoreStatus(PCDM_SS_OK);
+    writer.Write(snapshot.xcaf, stream, Message_ProgressRange());
+    stream.close();
+    if (writer.GetStoreStatus() == PCDM_SS_OK && stream.good())
+    {
+      return std::move(snapshot.document);
+    }
+  }
+  catch (const Standard_Failure&)
+  {
+  }
+  return {};
+}
+
+std::shared_ptr<PreparedProjectGeometry> OccGeometryService::prepareXcaf(
+  const std::filesystem::path& path, domain::GeometryRevision revision,
+  const std::string& sourceName) const
+{
+  try
+  {
+    std::ifstream stream(path, std::ios::binary);
+    occ::handle<Storage_Data> storage;
+    if (!stream || PCDM_ReadWriter::FileFormat(stream, storage) != "BinXCAF")
+    {
+      return {};
+    }
+    const occ::handle<TDocStd_Document> document = new TDocStd_Document("BinXCAF");
+    const occ::handle<TDocStd_Application> application = new TDocStd_Application();
+    document->Open(application);
+    BinXCAFDrivers_DocumentRetrievalDriver reader;
+    reader.Read(stream, storage, document, application);
+    double lengthUnit = 0.0;
+    if (reader.GetStatus() != PCDM_RS_OK || stream.bad()
+      || !XCAFDoc_DocumentTool::GetLengthUnit(document, lengthUnit, UnitsMethods_LengthUnit_Millimeter)
+      || lengthUnit != 1.0)
+    {
+      return {};
+    }
+    return describeDocument(document, revision, sourceName);
+  }
+  catch (const Standard_Failure&)
+  {
+    return {};
+  }
+}
+
+void OccGeometryService::activate(std::shared_ptr<PreparedProjectGeometry> prepared)
+{
+  if (!prepared)
+  {
+    repository_->replace({}, {}, {}, {});
+    return;
+  }
+  auto geometry = std::dynamic_pointer_cast<OccPreparedGeometry>(prepared);
+  if (geometry)
+  {
+    repository_->replace(geometry->xcaf, std::move(geometry->document),
+      std::move(geometry->records), std::move(geometry->topologyShapes));
+  }
 }
 
 std::shared_ptr<IGeometryService> createOccGeometryService()

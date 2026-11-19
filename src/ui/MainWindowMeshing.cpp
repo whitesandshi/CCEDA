@@ -20,7 +20,7 @@ namespace cceda::ui
 {
 void MainWindow::startMeshing()
 {
-  if (meshingActive_ || importWatcher_.isRunning() || meshPresentationWatcher_.isRunning() ||
+  if (meshingActive_ || importProgress_ || projectProgress_ || meshPresentationPending_ ||
       snapshotService_ == nullptr || meshingController_ == nullptr)
   {
     return;
@@ -32,6 +32,7 @@ void MainWindow::startMeshing()
     return;
   }
 
+  meshingPanel_->commitSettingsEdits();
   auto snapshotDirectory =
       std::make_unique<QTemporaryDir>(QDir(QDir::tempPath()).filePath("cceda-snapshot-XXXXXX"));
   if (!snapshotDirectory->isValid())
@@ -161,17 +162,8 @@ void MainWindow::cancelMeshing()
 void MainWindow::meshingSucceeded(const application::ExperimentalMeshingJobResult& result)
 {
   meshingPanel_->showSucceeded(result);
-  qualityPanel_->showQuality(result.quality);
-  meshIssueElementIds_.clear();
-  if (result.quality)
-  {
-    meshIssueElementIds_.reserve(result.quality->issues.size());
-    for (const mesh_quality::MeshQualityIssue& issue : result.quality->issues)
-    {
-      meshIssueElementIds_.push_back(issue.elementId);
-    }
-  }
-  outputTabs_->setCurrentWidget(qualityPanel_);
+  setProjectDirty(true);
+  displayAcceptedQuality(result.quality);
   appendLog(tr("Mesh committed: revision %1, %2 nodes, %3 triangles, %4 tetrahedra")
                 .arg(result.committedMeshRevision)
                 .arg(static_cast<qulonglong>(result.nodeCount))
@@ -183,7 +175,7 @@ void MainWindow::meshingSucceeded(const application::ExperimentalMeshingJobResul
 
 void MainWindow::prepareCurrentMeshPresentation()
 {
-  if (meshPresentationWatcher_.isRunning())
+  if (meshPresentationPending_)
   {
     appendLog(tr("Mesh surface preparation is already running."));
     return;
@@ -213,6 +205,8 @@ void MainWindow::prepareCurrentMeshPresentation()
   const auto controller = viewportController_;
   const std::vector<domain::MeshElementId> locatableElementIds =
     meshIssueElementIds_;
+  meshPresentationPending_ = true;
+  updateProjectActions();
   meshPresentationWatcher_.setFuture(QtConcurrent::run(
     [controller, mesh, locatableElementIds, coloring] {
       try
@@ -291,6 +285,8 @@ void MainWindow::setIssueElementsOnly(
 
 void MainWindow::meshPresentationFinished()
 {
+  meshPresentationPending_ = false;
+  updateProjectActions();
   meshingPanel_->setGenerationBlocked(false);
   generateMeshAction_->setEnabled(
     hasMeshableGeometry() && !meshingActive_ && !importWatcher_.isRunning());
@@ -358,7 +354,7 @@ void MainWindow::finishMeshingTask()
 {
   meshingActive_ = false;
   qualityPanel_->setColoringAvailable(projectState_.meshState() == domain::MeshState::Ready
-    && !importWatcher_.isRunning() && !meshPresentationWatcher_.isRunning());
+    && !importProgress_ && !meshPresentationPending_);
   snapshotCancellationRequested_ = false;
   generateMeshAction_->setEnabled(hasMeshableGeometry());
   cancelMeshAction_->setEnabled(false);

@@ -1,16 +1,20 @@
 #include "persistence/ProjectZipArchive.h"
 
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
+#include <QUuid>
 #include <QtEndian>
 #include <miniz.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <new>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -148,6 +152,30 @@ bool createStaging(QFile& file, const QString& path)
     return false;
   }
   return true;
+}
+
+bool publishStaging(HANDLE handle, const QString& finalPath)
+{
+  const QString nativePath = QDir::toNativeSeparators(finalPath);
+  const auto native = reinterpret_cast<LPCWSTR>(nativePath.utf16());
+  const DWORD attributes = GetFileAttributesW(native);
+  if (attributes == INVALID_FILE_ATTRIBUTES)
+  {
+    if (GetLastError() != ERROR_FILE_NOT_FOUND) { return false; }
+  }
+  else if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+  {
+    return false;
+  }
+  const auto nameBytes = static_cast<DWORD>(nativePath.size() * sizeof(wchar_t));
+  const auto infoBytes = static_cast<DWORD>(sizeof(FILE_RENAME_INFO)) + nameBytes;
+  auto buffer = std::make_unique<std::byte[]>(infoBytes);
+  auto* info = new (buffer.get()) FILE_RENAME_INFO{};
+  info->ReplaceIfExists = TRUE;
+  info->FileNameLength = nameBytes;
+  // The Win32 structure has a variable-length tail. Copy through the buffer.
+  std::memcpy(buffer.get() + offsetof(FILE_RENAME_INFO, FileName), native, nameBytes);
+  return SetFileInformationByHandle(handle, FileRenameInfo, info, infoBytes) != 0;
 }
 
 class ZipStream final : public QIODevice
@@ -420,8 +448,8 @@ struct Source
 };
 }
 
-ProjectZipResult writeNewProjectZip(const QString& stagingPath, const ProjectManifest& manifest,
-  const OpenProjectResource& openResource, const ProjectZipOptions& options)
+ProjectZipResult ProjectZipReader::writeInternal(const QString& stagingPath, const QString& finalPath,
+  const ProjectManifest& manifest, const OpenProjectResource& openResource, const ProjectZipOptions& options)
 {
   if (!packagePath(stagingPath)) { return {Error::InvalidPath}; }
   if (!validOptions(options)) { return {Error::LimitsExceeded}; }
@@ -479,9 +507,37 @@ ProjectZipResult writeNewProjectZip(const QString& stagingPath, const ProjectMan
   if (!mz_zip_writer_add_mem(&state.zip, "manifest.json", encoded.bytes.constData(), encoded.bytes.size(), 0)
     || !mz_zip_writer_finalize_archive(&state.zip) || !mz_zip_writer_end(&state.zip) || !state.file.flush())
   { return {Error::WriteFailed}; }
-  const auto reopened = ProjectZipReader::openInternal(stagingPath, options, true);
-  if (!reopened.succeeded()) { return reopened.status; }
+  {
+    const auto reopened = openInternal(stagingPath, options, true);
+    if (!reopened.succeeded()) { return reopened.status; }
+  }
+  if (!finalPath.isEmpty())
+  {
+    const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(state.file.handle()));
+    if (!FlushFileBuffers(handle) || !publishStaging(handle, finalPath))
+    { return {Error::PublishFailed, finalPath}; }
+  }
   cleanup.keep = true;
   return {};
+}
+
+ProjectZipResult writeNewProjectZip(const QString& stagingPath, const ProjectManifest& manifest,
+  const OpenProjectResource& openResource, const ProjectZipOptions& options)
+{
+  return ProjectZipReader::writeInternal(stagingPath, {}, manifest, openResource, options);
+}
+
+ProjectZipResult replaceProjectZip(const QString& finalPath, const ProjectManifest& manifest,
+  const OpenProjectResource& openResource, const ProjectZipOptions& options)
+{
+  if (!packagePath(finalPath)) { return {Error::InvalidPath, finalPath}; }
+  const QString absolute = QDir::cleanPath(QFileInfo(finalPath).absoluteFilePath());
+  const QFileInfo target(absolute);
+  if (absolute.size() >= 32767 || absolute.startsWith("//?/") || absolute.startsWith("//./")
+    || target.fileName().contains(':'))
+  { return {Error::InvalidPath, finalPath}; }
+  const QString staging = target.dir().filePath(".cceda-save-"
+    + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".cceda");
+  return ProjectZipReader::writeInternal(staging, absolute, manifest, openResource, options);
 }
 }

@@ -11,7 +11,8 @@ class IGeometryService
 {
 public:
   virtual ~IGeometryService() = default;
-  virtual domain::GeometryImportResult importStep(const std::filesystem::path& path) = 0;
+  virtual domain::GeometryImportResult importStep(const std::filesystem::path& path,
+    const std::string& sourceName = {}) = 0;
   [[nodiscard]] virtual domain::GeometryDocument currentDocument() const = 0;
 };
 

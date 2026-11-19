@@ -25,6 +25,7 @@ enum class ProjectZipError
   InvalidManifest,
   ResourceVerificationFailed,
   WriteFailed,
+  PublishFailed,
 };
 
 struct ProjectZipResult
@@ -55,6 +56,11 @@ public:
 private:
   friend ProjectZipResult writeNewProjectZip(const QString&, const ProjectManifest&,
     const OpenProjectResource&, const ProjectZipOptions&);
+  friend ProjectZipResult replaceProjectZip(const QString&, const ProjectManifest&,
+    const OpenProjectResource&, const ProjectZipOptions&);
+  [[nodiscard]] static ProjectZipResult writeInternal(const QString& stagingPath,
+    const QString& finalPath, const ProjectManifest&, const OpenProjectResource&,
+    const ProjectZipOptions&);
   [[nodiscard]] static ProjectZipOpenResult openInternal(
     const QString& path, const ProjectZipOptions& options, bool guardedWriter);
   explicit ProjectZipReader(std::shared_ptr<detail::ProjectZipState> state);
@@ -67,5 +73,10 @@ private:
 // Removes only its own incomplete file on failure. No live-state publication.
 [[nodiscard]] ProjectZipResult writeNewProjectZip(
   const QString& stagingPath, const ProjectManifest& manifest,
+  const OpenProjectResource& openResource, const ProjectZipOptions& options = {});
+
+// Stages beside the destination and replaces it only after full verification.
+[[nodiscard]] ProjectZipResult replaceProjectZip(
+  const QString& finalPath, const ProjectManifest& manifest,
   const OpenProjectResource& openResource, const ProjectZipOptions& options = {});
 }

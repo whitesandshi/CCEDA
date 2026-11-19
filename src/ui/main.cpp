@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -70,15 +71,18 @@ int main(int argc, char* argv[])
   const auto filePublisher =
       std::make_shared<cceda::platform::WindowsStagedFilePublisher>();
 
-  cceda::ui::MainWindow window(geometryService, snapshotService, viewportController,
+  cceda::ui::MainWindow window(geometryService, geometryService, snapshotService, viewportController,
                                meshingRuntimeConfiguration(), meshExporter,
                                filePublisher);
   window.show();
 
   if (argc > 1)
   {
-    const QString stepPath = application.arguments().at(1);
-    QTimer::singleShot(0, &window, [&window, stepPath] { window.openStepPath(stepPath); });
+    const QString path = application.arguments().at(1);
+    QTimer::singleShot(0, &window, [&window, path] {
+      if (QFileInfo(path).suffix().compare("cceda", Qt::CaseInsensitive) == 0) { window.openProjectPath(path); }
+      else { window.openStepPath(path); }
+    });
   }
   return application.exec();
 }

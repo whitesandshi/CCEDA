@@ -218,13 +218,14 @@ recomputes. The Controller now commits a quality-valid mesh through
   - [x] Expose surface metrics, explicit user thresholds, Apply, and the applied legend.
   - [x] Verify Release build and all 24 tests with unrestricted temporary-file access.
   - [ ] Complete desktop visual acceptance and approve preset threshold profiles.
-- [ ] Persist current mesh settings, reports, and accepted quality results.
+- [x] Persist mesh settings, the current neutral mesh, and accepted quality results.
   - [x] Implement and test the versioned mesh/settings.json entry codec.
   - [x] Add committed mesh/quality.json storage with independent recomputation and paired meshbin tests.
   - [x] Add deterministic manifest JSON with bounded safe logical paths and entry hashes.
   - [x] Add streaming package-resource integrity checks, feature compatibility gates, and total-size budgets.
   - [x] Add bounded ZIP32/ZIP64 container I/O, exclusive verified staging writes, and independent interoperability tests.
-  - [ ] Integrate settings with consistent project snapshots and package Save/Open.
+  - [x] Integrate settings with consistent project snapshots and package Save/Open.
+  - [x] Verify desktop import, mesh, save, reopen without the external STEP, remesh, and resave.
 
 ## Risks and Mitigations
 

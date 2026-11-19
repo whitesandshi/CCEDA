@@ -4,14 +4,15 @@ CCEDA is a solver-neutral geometry and mesh preprocessing desktop application. T
 
 ## Features
 
-- Open `.step` and `.stp` files asynchronously.
+- Import `.step` and `.stp` files asynchronously.
+- Save and reopen self-contained `.cceda` projects with the original STEP, canonical XCAF, mesh settings, and any current mesh with its accepted quality results.
 - Preserve the XCAF assembly hierarchy, names, colors, and placements.
 - Inspect solid, face, edge, vertex, volume, validity, and meshability counts.
 - Create a revision-bound independent-Solid OCCT BREP snapshot with per-region bounds signatures, a versioned geometry map, and SHA-256 digests.
 - Select independent-Solid or conformal multi-region meshing; conformal jobs fragment only their revision-bound OCCT snapshot and retain source-Solid mappings.
 - Select tree entities and highlight the corresponding shape.
 - Pan, rotate, zoom, fit, and restore an isometric view.
-- Open a STEP file directly from the command line.
+- Open a STEP or CCEDA project file directly from the command line.
 - Run an experimental isolated Gmsh executable Worker with a bounded versioned handshake.
 - Prepare an isolated job workspace from revision-bound BREP and geometry-map artifacts, validating both SHA-256 digests and publishing the request last.
 - Launch that Worker asynchronously from a main-process client that validates control messages, job identity, geometry revision, and output digests before publishing a result.
@@ -92,4 +93,4 @@ The geometry adapter now creates protocol-0.2 independent-Solid snapshots from o
 
 Meshing now exposes a typed Delaunay/HXT algorithm whitelist and an opt-in automatic retry policy. Retry is disabled by default and bounded to two attempts. Only surface- or volume-generation failures switch to the alternate algorithm; later attempts preserve all other settings, start a fresh Worker in a separate workspace, retain failed-attempt diagnostics, and consume the remaining total time budget. Resource, input, topology, cancellation, Worker-loss, output, quality, stale-revision, and commit failures remain terminal.
 
-This is not yet the complete product mesh pipeline. The intermediate Worker `.msh` remains diagnostic and the executable adapter is still reported as experimental. Stable Face reconciliation, project persistence, preset quality thresholds, and volume quality coloring remain future slices.
+This is not yet the complete product mesh pipeline. The intermediate Worker `.msh` remains diagnostic and the executable adapter is still reported as experimental. Stable Face reconciliation, healing and job history persistence, preset quality thresholds, and volume quality coloring remain future slices.

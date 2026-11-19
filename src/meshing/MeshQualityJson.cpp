@@ -508,9 +508,9 @@ MeshQualityJsonWriteResult writeCommittedMeshQualityJson(
   return writeQualityJson(report, {}, limits, true);
 }
 
-MeshQualityJsonReadResult readMeshQualityJson(
+static MeshQualityJsonReadResult readQualityJson(
   QIODevice& input,
-  const MeshQualityJsonLimits& limits)
+  const MeshQualityJsonLimits& limits, bool committed)
 {
   if (!input.isOpen() || !input.isReadable() || !validLimits(limits))
   {
@@ -542,9 +542,12 @@ MeshQualityJsonReadResult readMeshQualityJson(
   }
 
   const QJsonObject root = document.object();
-  if (!hasExactlyKeys(root, {
-      "schema", "jobId", "meshRevision", "sourceGeometryRevision",
-      "metricVersion", "validForCommit", "counts", "summaries", "issues"}))
+  auto commonFields = root;
+  const auto jobId = commonFields.take("jobId");
+  if (!hasExactlyKeys(commonFields, {
+      "schema", "meshRevision", "sourceGeometryRevision",
+      "metricVersion", "validForCommit", "counts", "summaries", "issues"})
+    || (committed ? !jobId.isUndefined() : !jobId.isString()))
   {
     return readFailure(MeshQualityJsonErrorCode::InvalidStructure,
       "Mesh quality JSON root fields are invalid");
@@ -560,7 +563,7 @@ MeshQualityJsonReadResult readMeshQualityJson(
   const auto schemaMinor = unsignedInteger(schema.value("minor"));
   if (!hasExactlyKeys(schema, {"name", "major", "minor"})
       || schema.value("name").toString()
-        != "cceda.mesh-quality-worker"
+        != (committed ? "cceda.mesh-quality-project" : "cceda.mesh-quality-worker")
       || !schemaMajor
       || *schemaMajor != MeshQualityJsonSchemaMajor
       || !schemaMinor
@@ -578,9 +581,8 @@ MeshQualityJsonReadResult readMeshQualityJson(
     mesh_quality::MeshQualityMetricVersion.data(),
     static_cast<qsizetype>(
       mesh_quality::MeshQualityMetricVersion.size()));
-  if (!root.value("jobId").isString()
-      || !validJobId(root.value("jobId").toString())
-      || !meshRevision || *meshRevision != 0
+  if ((!committed && !validJobId(jobId.toString()))
+      || !meshRevision || (committed ? *meshRevision == 0 : *meshRevision != 0)
       || !geometryRevision || *geometryRevision == 0
       || !root.value("metricVersion").isString()
       || metricVersion != expectedMetricVersion
@@ -752,5 +754,17 @@ MeshQualityJsonReadResult readMeshQualityJson(
   }
 
   return {std::move(artifact), MeshQualityJsonErrorCode::None, {}};
+}
+
+MeshQualityJsonReadResult readMeshQualityJson(
+  QIODevice& input, const MeshQualityJsonLimits& limits)
+{
+  return readQualityJson(input, limits, false);
+}
+
+MeshQualityJsonReadResult readCommittedMeshQualityJson(
+  QIODevice& input, const MeshQualityJsonLimits& limits)
+{
+  return readQualityJson(input, limits, true);
 }
 }

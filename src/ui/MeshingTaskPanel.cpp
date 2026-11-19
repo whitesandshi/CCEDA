@@ -8,13 +8,23 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <array>
+#include <type_traits>
+
 namespace cceda::ui
 {
+namespace
+{
+constexpr std::uint64_t MillisecondsPerMinute = 60 * 1000;
+constexpr std::uint64_t BytesPerMiB = 1024 * 1024;
+}
+
 MeshingTaskPanel::MeshingTaskPanel(QWidget* parent) : QWidget(parent)
 {
   setObjectName("meshingTaskPanel");
@@ -225,6 +235,30 @@ MeshingTaskPanel::MeshingTaskPanel(QWidget* parent) : QWidget(parent)
     this, [this] { resetDefaults(); });
   connect(automaticRetry_, &QCheckBox::toggled,
     maximumAttempts_, &QSpinBox::setEnabled);
+  for (auto* combo : {mode_, algorithm_})
+  {
+    connect(combo, &QComboBox::currentIndexChanged, this, &MeshingTaskPanel::settingsChanged);
+  }
+  for (auto* spin : {curvatureElements_, maximumThreads_, maximumAttempts_})
+  {
+    connect(spin, &QSpinBox::valueChanged, this, &MeshingTaskPanel::settingsChanged);
+  }
+  for (auto* check : {optimizeTetrahedra_, automaticRetry_})
+  {
+    connect(check, &QCheckBox::toggled, this, &MeshingTaskPanel::settingsChanged);
+  }
+  const auto trackRoundedSetting = [this](auto* control, auto& exact) {
+    using Control = std::remove_pointer_t<decltype(control)>;
+    connect(control, &Control::valueChanged, this, [this, control, &exact] {
+      exact.reset();
+      control->setToolTip({});
+      emit settingsChanged();
+    });
+  };
+  trackRoundedSetting(minimumSize_, restoredMinimum_);
+  trackRoundedSetting(maximumSize_, restoredMaximum_);
+  trackRoundedSetting(maximumMinutes_, restoredElapsedLimit_);
+  trackRoundedSetting(maximumMemoryMiB_, restoredMemoryLimit_);
   setBusy(false);
 }
 
@@ -252,11 +286,18 @@ void MeshingTaskPanel::setGenerationBlocked(bool blocked)
   }
 }
 
+void MeshingTaskPanel::commitSettingsEdits()
+{
+  const std::array<QAbstractSpinBox*, 7> controls{minimumSize_, maximumSize_,
+    curvatureElements_, maximumAttempts_, maximumThreads_, maximumMinutes_, maximumMemoryMiB_};
+  for (auto* control : controls) { control->interpretText(); }
+}
+
 domain::MeshGenerationSettings MeshingTaskPanel::settings() const noexcept
 {
   return {
-    minimumSize_->value(),
-    maximumSize_->value(),
+    restoredMinimum_.value_or(minimumSize_->value()),
+    restoredMaximum_.value_or(maximumSize_->value()),
     static_cast<std::uint32_t>(curvatureElements_->value()),
     optimizeTetrahedra_->isChecked(),
     static_cast<std::uint32_t>(maximumThreads_->value()),
@@ -276,8 +317,8 @@ domain::MeshGenerationMode MeshingTaskPanel::mode() const noexcept
 domain::MeshingResourceLimits MeshingTaskPanel::resourceLimits() const noexcept
 {
   return {
-    static_cast<std::uint64_t>(maximumMinutes_->value()) * 60ULL * 1000ULL,
-    static_cast<std::uint64_t>(maximumMemoryMiB_->value()) * 1024ULL * 1024ULL,
+    restoredElapsedLimit_.value_or(maximumMinutes_->value() * MillisecondsPerMinute),
+    restoredMemoryLimit_.value_or(maximumMemoryMiB_->value() * BytesPerMiB),
   };
 }
 
@@ -315,17 +356,61 @@ void MeshingTaskPanel::requestGeneration()
 
 void MeshingTaskPanel::resetDefaults()
 {
-  minimumSize_->setValue(0.0);
-  maximumSize_->setValue(0.0);
-  mode_->setCurrentIndex(0);
-  curvatureElements_->setValue(0);
-  algorithm_->setCurrentIndex(0);
-  optimizeTetrahedra_->setChecked(false);
-  automaticRetry_->setChecked(false);
-  maximumAttempts_->setValue(
-    static_cast<int>(domain::MaximumAutomaticMeshingAttempts));
-  maximumThreads_->setValue(0);
-  maximumMinutes_->setValue(0);
-  maximumMemoryMiB_->setValue(0);
+  applySettings(domain::MeshGenerationMode::IndependentSolids, {}, {}, {});
+  emit settingsChanged();
+}
+
+void MeshingTaskPanel::applySettings(domain::MeshGenerationMode mode,
+  const domain::MeshGenerationSettings& settings, const domain::MeshingResourceLimits& limits,
+  const domain::MeshingRetryPolicy& retry)
+{
+  const QSignalBlocker blocker(this);
+  mode_->setCurrentIndex(mode_->findData(static_cast<int>(mode)));
+  algorithm_->setCurrentIndex(algorithm_->findData(static_cast<int>(settings.algorithm)));
+  curvatureElements_->setValue(static_cast<int>(settings.curvatureElementsPerCircle));
+  maximumThreads_->setValue(static_cast<int>(settings.maximumThreads));
+  optimizeTetrahedra_->setChecked(settings.optimizeTetrahedra);
+  automaticRetry_->setChecked(retry.automaticRetry);
+  maximumAttempts_->setValue(static_cast<int>(retry.maximumAttempts));
+
+  // Packages can store finer precision than the controls display. Keep each
+  // exact value until its corresponding control is edited.
+  const auto setSize = [this](QDoubleSpinBox* control, auto& exact, double value) {
+    control->setValue(value);
+    exact = control->value() == value ? std::nullopt : std::optional<double>(value);
+    control->setToolTip(exact ? tr("Stored value: %1 mm").arg(value, 0, 'g', 17) : QString{});
+  };
+  const auto setLimit = [](QSpinBox* control, auto& exact, std::uint64_t value,
+    std::uint64_t unit, const QString& tooltip) {
+    const auto displayed = (value + unit - 1) / unit;
+    control->setValue(static_cast<int>(displayed));
+    exact = displayed * unit == value ? std::nullopt : std::optional<std::uint64_t>(value);
+    control->setToolTip(exact ? tooltip : QString{});
+  };
+  setSize(minimumSize_, restoredMinimum_, settings.minimumSizeMm);
+  setSize(maximumSize_, restoredMaximum_, settings.maximumSizeMm);
+  setLimit(maximumMinutes_, restoredElapsedLimit_, limits.maximumElapsedMilliseconds,
+    MillisecondsPerMinute, tr("Stored limit: %1 ms").arg(limits.maximumElapsedMilliseconds));
+  setLimit(maximumMemoryMiB_, restoredMemoryLimit_, limits.maximumWorkingSetBytes,
+    BytesPerMiB, tr("Stored limit: %1 bytes").arg(limits.maximumWorkingSetBytes));
+}
+
+void MeshingTaskPanel::resetTaskResult()
+{
+  progress_->setRange(0, 100);
+  progress_->setValue(0);
+  summary_->clear();
+  summary_->setToolTip({});
+  setGeometryAvailable(geometryAvailable_);
+}
+
+void MeshingTaskPanel::showRestoredMesh(const domain::MeshModel& mesh,
+  const application::AcceptedMeshQuality& quality)
+{
+  resetTaskResult();
+  progress_->setValue(100);
+  status_->setText(tr("Mesh ready"));
+  summary_->setText(tr("Revision %1 | %2 nodes | %3 triangles | %4 tetrahedra | Quality valid")
+    .arg(mesh.meshRevision).arg(mesh.nodes.size()).arg(quality.triangleCount).arg(quality.tetrahedronCount));
 }
 }
