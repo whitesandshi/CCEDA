@@ -133,6 +133,45 @@ Codes are stable and separate from localization. An unavailable or unreliable ch
 
 In independent mode, one blocked Solid does not automatically block other valid Solids, but skipping it requires explicit confirmation. In conformal mode, any blocking error in a participating region blocks the job.
 
+### 7.4 Initial Solid B-Rep Check
+
+The validation service checks one indexed Solid identified by a positive
+geometry revision and a nonempty geometry ID. Its result carries that revision
+and ID. A rejected Solid gets one report-local UUID and a scoped
+`GEO_INVALID_BREP` validity issue (Error, no proposed repair or numeric evidence).
+The result does not report that other checks passed or that meshing is safe.
+
+Invalid requests, revision mismatches, unknown IDs, non-Solid targets, and
+unavailable checks are distinct outcomes and carry no issue. The check does not
+modify geometry, change revisions, or gate meshing. Consumers must compare the
+result revision before using it as current.
+
+### 7.5 Document B-Rep Report
+
+`checkDocumentBrep` takes a positive geometry revision and captures the
+document index and topology for that revision together. A completed report
+contains one B-Rep outcome per indexed Solid in document order, including
+invalid, missing, unsupported, and unavailable results. A document with no
+indexed Solids yields a completed report with zero results. Invalid requests,
+revision mismatches, and unavailable snapshots return distinct report statuses
+with zero results.
+
+Completion means the report covers the indexed Solids. Each Solid's status
+describes its B-Rep check. The workbench must compare the report revision with
+the current geometry revision before presenting it as current.
+
+### 7.6 Workbench Inspection
+
+After STEP import or project reopen, the Issues tab clears the previous report
+and runs the B-Rep checks in the background. A project replacement invalidates the
+in-flight report even if the replacement has the same numeric revision. The tab
+shows a count of valid, invalid, and unchecked Solids and lists their IDs, check
+statuses, and available issue codes. An empty geometry document has a distinct
+state from a loaded document with no indexed Solids.
+
+Activating a result selects its Solid in the model tree, opens its properties,
+and highlights its wireframe in the geometry view. This inspection is read-only.
+
 ## 8. Healing
 
 Validation creates issues; it never mutates geometry. Healing is plan-then-commit.

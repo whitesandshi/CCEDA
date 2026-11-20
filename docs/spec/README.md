@@ -12,6 +12,10 @@ and a verified ZIP32/ZIP64 container adapter with exclusive staging writes.
 The workbench now saves and opens self-contained project snapshots with the
 original STEP, canonical XCAF, mesh settings, and revision-bound mesh and quality.
 
+The workbench Issues tab shows the revision-bound results of read-only Solid
+B-Rep checks after STEP import and project reopen. Activating a row locates its
+Solid in the model tree and geometry view.
+
 The sealed `cceda.geometry-map/0.2` input records finite canonical-millimeter bounds for every located snapshot Solid or conformal fragment. The executable Worker reconciles multi-region independent or conformal regions against MSH 4.1 volume bounds without relying on import or tag order.
 
 ## Documents

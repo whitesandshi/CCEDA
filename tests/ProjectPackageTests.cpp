@@ -179,16 +179,26 @@ int main(int argc, char** argv)
       && project.settings.generation.maximumSizeMm == settings.generation.maximumSizeMm
       && project.settings.mode == settings.mode, "settings round-trip exactly");
 
+    auto updatedSettings = settings;
+    updatedSettings.resourceLimits.maximumElapsedMilliseconds = 250864;
+    const auto replacement = ProjectSaveSnapshot::capture(state, identity, imported.source, updatedSettings);
+    require(bool(replacement), "capture changed settings for replacement");
     auto locked = ProjectZipReader::open(path, packageOptions());
     require(locked.succeeded(), "target can be held read-only");
     const auto oldBytes = fileBytes(path);
-    require(!saveProjectPackage(path, *snapshot, geometry, "CCEDA/test").isEmpty()
+    require(!saveProjectPackage(path, *replacement, geometry, "CCEDA/test").isEmpty()
       && fileBytes(path) == oldBytes, "failed replacement preserves the previous file");
     require(QDir(temp.path()).entryList({".cceda-save-*"}, QDir::Files | QDir::Hidden).isEmpty(),
       "staging file is removed when publication fails");
     locked.archive.reset();
-    require(saveProjectPackage(path, *snapshot, geometry, "CCEDA/test").isEmpty(),
+    const auto preserved = openProjectPackage(path, geometry);
+    require(preserved.project && preserved.project->settings.resourceLimits.maximumElapsedMilliseconds
+      == settings.resourceLimits.maximumElapsedMilliseconds, "failed replacement leaves the old settings readable");
+    require(saveProjectPackage(path, *replacement, geometry, "CCEDA/test").isEmpty(),
       "retry can atomically replace the previous project");
+    const auto replaced = openProjectPackage(path, geometry);
+    require(replaced.project && replaced.project->settings.resourceLimits.maximumElapsedMilliseconds
+      == updatedSettings.resourceLimits.maximumElapsedMilliseconds, "reopening after retry reads the updated settings");
 
     const auto mismatched = temp.filePath("Mismatched.cceda");
     replacePayload(path, mismatched, "project.json", [](const auto& bytes) {

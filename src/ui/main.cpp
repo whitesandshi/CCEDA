@@ -3,6 +3,7 @@
 #include "geometry/OccGeometryRepository.h"
 #include "geometry/OccGeometryService.h"
 #include "geometry/OccGeometrySnapshotService.h"
+#include "geometry/OccGeometryValidationService.h"
 #include "meshing/GmshMsh41MeshExporter.h"
 #include "platform/WindowsStagedFilePublisher.h"
 #include "visualization/OccViewportController.h"
@@ -64,6 +65,8 @@ int main(int argc, char* argv[])
   const auto geometryService = std::make_shared<cceda::geometry::OccGeometryService>(repository);
   const auto snapshotService =
       std::make_shared<cceda::geometry::OccGeometrySnapshotService>(repository);
+  const auto validationService =
+      std::make_shared<cceda::geometry::OccGeometryValidationService>(repository);
   const auto viewportController =
       std::make_shared<cceda::visualization::OccViewportController>(repository);
   const auto meshExporter =
@@ -71,7 +74,8 @@ int main(int argc, char* argv[])
   const auto filePublisher =
       std::make_shared<cceda::platform::WindowsStagedFilePublisher>();
 
-  cceda::ui::MainWindow window(geometryService, geometryService, snapshotService, viewportController,
+  cceda::ui::MainWindow window(geometryService, geometryService, snapshotService, validationService,
+                               viewportController,
                                meshingRuntimeConfiguration(), meshExporter,
                                filePublisher);
   window.show();

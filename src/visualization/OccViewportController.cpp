@@ -151,6 +151,7 @@ void OccViewportController::displayCurrentGeometry()
   }
 
   context_->RemoveAll(false);
+  solidHighlight_.Nullify();
   meshPresentation_.Nullify();
   meshIssuesPresentation_.Nullify();
   for (auto& presentation : meshQualityPresentations_)
@@ -409,7 +410,8 @@ void OccViewportController::setIsometric()
   }
 }
 
-void OccViewportController::highlight(std::string_view geometryId)
+void OccViewportController::highlight(
+  domain::GeometryRevision revision, std::string_view geometryId)
 {
   if (!ready())
   {
@@ -417,16 +419,34 @@ void OccViewportController::highlight(std::string_view geometryId)
   }
 
   context_->ClearSelected(false);
+  if (!solidHighlight_.IsNull())
+  {
+    context_->Remove(solidHighlight_, false);
+    solidHighlight_.Nullify();
+  }
   if (meshVisible_)
   {
     view_->Redraw();
     return;
   }
 
-  const auto found = presentations_.find(std::string(geometryId));
+  const std::string id(geometryId);
+  const auto found = presentations_.find(id);
   if (found != presentations_.end())
   {
     context_->SetSelected(found->second, false);
+  }
+  else
+  {
+    const auto target = repository_->lookupTopologyShape(revision, id);
+    if (target.status == geometry::OccShapeLookupStatus::Found && !target.shape.IsNull()
+        && target.shape.ShapeType() == TopAbs_SOLID)
+    {
+      solidHighlight_ = new AIS_Shape(target.shape);
+      solidHighlight_->SetColor(Quantity_Color(Quantity_NOC_ORANGE));
+      solidHighlight_->SetWidth(3.0);
+      context_->Display(solidHighlight_, AIS_WireFrame, -1, false);
+    }
   }
   view_->Redraw();
 }
@@ -528,6 +548,12 @@ void OccViewportController::setGeometryVisible(bool visible)
   if (!ready())
   {
     return;
+  }
+
+  if (!visible && !solidHighlight_.IsNull())
+  {
+    context_->Remove(solidHighlight_, false);
+    solidHighlight_.Nullify();
   }
 
   for (const auto& [id, presentation] : presentations_)

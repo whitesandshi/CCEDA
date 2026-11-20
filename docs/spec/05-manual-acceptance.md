@@ -120,6 +120,12 @@ Expected: node/triangle/tetra/region counts agree, coordinates are millimeters, 
 Simulate an unwritable target or insufficient disk during save.  
 Expected: previous `.cceda` remains readable, temporary file does not replace it, and UI identifies the error/log.
 
+#### Scope of the Current Save/Open Checks
+
+- For the current desktop smoke test, import a copy of a STEP file, generate a mesh, and save the project. Close the workbench and move the STEP copy out of the import path. Reopen the `.cceda` and check the assembly, meshing settings, current mesh, and accepted quality. Remesh, save to the same project, and reopen it again to verify that the new mesh and quality were saved.
+- The full AC-014 still requires restoration of healing history and geometry validation reports.
+- The automated `persistence.project_package` test simulates a locked destination and checks that the previous archive remains readable, the staging file is removed, and a retry publishes new settings. AC-016 also requires a desktop check of the error dialog and workbench log after a failed save.
+
 ## 5. Evidence
 
 Record build/dependency versions, model digest and ID, mode/settings digest, expected/actual result, screenshot path, error code/log path, elapsed time, peak memory, and node/element counts.

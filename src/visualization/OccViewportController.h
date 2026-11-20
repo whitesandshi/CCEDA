@@ -49,7 +49,7 @@ public:
     domain::MeshElementId elementId) override;
   void fitAll() override;
   void setIsometric() override;
-  void highlight(std::string_view geometryId) override;
+  void highlight(domain::GeometryRevision revision, std::string_view geometryId) override;
   void startRotation(int x, int y) override;
   void rotate(int x, int y) override;
   void pan(int deltaX, int deltaY) override;
@@ -69,6 +69,7 @@ private:
   occ::handle<WNT_Window> window_;
   occ::handle<AIS_InteractiveContext> context_;
   std::unordered_map<std::string, occ::handle<AIS_Shape>> presentations_;
+  occ::handle<AIS_Shape> solidHighlight_;
   occ::handle<AIS_Triangulation> meshPresentation_;
   occ::handle<AIS_Triangulation> meshIssuesPresentation_;
   std::array<occ::handle<AIS_Triangulation>, 4> meshQualityPresentations_{};

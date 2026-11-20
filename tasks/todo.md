@@ -179,3 +179,24 @@
 - [x] Test hostile containers, file locks, source changes, true 64-bit offsets, and Python ZIP interoperability.
 - [x] Integrate settings with consistent project snapshots and package Save/Open.
 - [x] Verify desktop import, mesh, save, reopen without the external STEP, remesh, and resave.
+- [x] Verify package round trips for empty, geometry-only, and meshed projects. Check embedded STEP bytes, XCAF instance placement and color, meshing settings, accepted quality, and exact revisions.
+- [x] Reject incompatible XCAF, mismatched mesh revisions, and invalid committed quality even when ZIP integrity checks pass.
+- [x] Simulate a locked destination. Check that the original package stays byte-for-byte intact and readable, the staging file is cleaned up, and reopening after a successful retry returns the changed settings.
+- [x] Build Release x64 and run the focused persistence, project-state, and meshing-panel tests (9/9), then the full Release suite (31/31, including ZIP interoperability) on 2026-11-20.
+
+The checked desktop smoke test was recorded with the Save/Open implementation in
+`35b082a`. The broader release cases, including healing-history restoration and
+desktop save-failure reporting, are tracked in [manual acceptance](../docs/spec/05-manual-acceptance.md#scope-of-the-current-saveopen-checks).
+
+## Geometry Validation Foundation
+
+- [x] Define the scoped Solid B-Rep check and structured issue contract.
+- [x] Test a valid box, an open-shell Solid, invalid requests, missing and unsupported targets, and revision replacement.
+- [x] Implement read-only lookup and checking behind the OCCT adapter.
+- [x] Verify Release x64: focused geometry tests (3/3), full suite (32/32).
+- [x] Add a revision-bound B-Rep report covering all indexed Solids.
+- [x] Present the B-Rep report in the workbench after import and reopen.
+- [x] Test report replacement at the same numeric revision, revision mismatch,
+  unavailable Solid outcomes, and row activation.
+- [x] Verify Release x64 (33/33) and smoke-test STEP import, Solid row location,
+  and report recalculation on project reopen in the desktop workbench.

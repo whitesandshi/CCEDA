@@ -227,6 +227,15 @@ recomputes. The Controller now commits a quality-valid mesh through
   - [x] Integrate settings with consistent project snapshots and package Save/Open.
   - [x] Verify desktop import, mesh, save, reopen without the external STEP, remesh, and resave.
 
+### Geometry Validation Foundation
+
+- [x] Specify a read-only, revision-bound B-Rep check for one indexed Solid.
+- [x] Add valid, malformed, unavailable, unsupported, and stale-target tests before implementation.
+- [x] Implement a dependency-free validation port and its OCCT adapter without changing meshing policy.
+- [x] Verify Release x64: focused geometry tests (3/3), full suite (32/32).
+- [x] Aggregate checks into a revision-bound report.
+- [x] Display the report in the workbench and locate Solids by geometry ID.
+
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "GeometryValidationPanel.h"
 #include "MeshingTaskPanel.h"
 #include "QualityInspectionPanel.h"
 #include "OccViewportWidget.h"
@@ -70,6 +71,7 @@ namespace cceda::ui
 MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryService,
                        std::shared_ptr<geometry::IProjectGeometryStorage> geometryStorage,
                        std::shared_ptr<geometry::IGeometrySnapshotService> snapshotService,
+                       std::shared_ptr<const geometry::IGeometryValidationService> validationService,
                        std::shared_ptr<visualization::IViewportController> viewportController,
                        application::MeshingRuntimeConfiguration meshingConfiguration,
                        std::shared_ptr<application::IMeshExporter> meshExporter,
@@ -90,7 +92,7 @@ MainWindow::MainWindow(std::shared_ptr<geometry::IGeometryService> geometryServi
   setCentralWidget(viewport_);
   meshExportController_ = std::make_unique<application::MeshExportJobController>(
       projectState_, std::move(meshExporter), std::move(filePublisher), this);
-  createDocks();
+  createDocks(std::move(validationService));
   createActions();
   statusBar()->showMessage("Ready");
 
@@ -290,7 +292,8 @@ void MainWindow::createActions()
   connect(meshingPanel_, &MeshingTaskPanel::cancelRequested, this, [this] { cancelMeshing(); });
 }
 
-void MainWindow::createDocks()
+void MainWindow::createDocks(
+  std::shared_ptr<const geometry::IGeometryValidationService> validationService)
 {
   QDockWidget* modelDock = new QDockWidget("Model", this);
   modelDock->setObjectName("modelDock");
@@ -336,18 +339,15 @@ void MainWindow::createDocks()
   outputDock->setObjectName("outputDock");
   outputDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
   outputTabs_ = new QTabWidget(outputDock);
-  issues_ = new QTableWidget(0, 2, outputTabs_);
-  issues_->setHorizontalHeaderLabels({"Severity", "Message"});
-  issues_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-  issues_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-  issues_->verticalHeader()->hide();
-  issues_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  geometryValidationPanel_ = new GeometryValidationPanel(std::move(validationService), outputTabs_);
+  connect(geometryValidationPanel_, &GeometryValidationPanel::solidActivated,
+          this, &MainWindow::locateSolid);
   meshingPanel_ = new MeshingTaskPanel(outputTabs_);
   qualityPanel_ = new QualityInspectionPanel(outputTabs_);
   log_ = new QPlainTextEdit(outputTabs_);
   log_->setReadOnly(true);
   log_->setMaximumBlockCount(2000);
-  outputTabs_->addTab(issues_, "Issues");
+  outputTabs_->addTab(geometryValidationPanel_, tr("Issues"));
   outputTabs_->addTab(meshingPanel_, "Tasks");
   outputTabs_->addTab(qualityPanel_, "Quality");
   outputTabs_->addTab(log_, "Log");
@@ -449,6 +449,10 @@ void MainWindow::populateModel(const domain::GeometryDocument& document)
     auto* nameItem = new QStandardItem(QString::fromUtf8(entity.name.c_str()));
     nameItem->setEditable(false);
     nameItem->setData(static_cast<int>(index), Qt::UserRole);
+    if (entity.kind == domain::GeometryKind::Solid)
+    {
+      nameItem->setData(QString::fromStdString(entity.id), Qt::UserRole + 1);
+    }
     auto* typeItem = new QStandardItem(kindName(entity.kind));
     typeItem->setEditable(false);
     auto* topologyItem =
@@ -497,7 +501,32 @@ void MainWindow::showEntity(int entityIndex)
     properties_->setItem(row, 0, new QTableWidgetItem(values[row].first));
     properties_->setItem(row, 1, new QTableWidgetItem(values[row].second));
   }
-  viewportController_->highlight(entity.id);
+  viewportController_->highlight(document_.revision, entity.id);
+}
+
+void MainWindow::locateSolid(domain::GeometryRevision revision, const std::string& targetId)
+{
+  if (revision == 0 || revision != document_.revision || importProgress_ || projectProgress_)
+  {
+    return;
+  }
+  const auto matches = model_->match(model_->index(0, 0), Qt::UserRole + 1,
+    QString::fromStdString(targetId), 1, Qt::MatchExactly | Qt::MatchRecursive);
+  if (matches.isEmpty())
+  {
+    return;
+  }
+  meshSurfaceAction_->setChecked(false);
+  const auto index = matches.front();
+  if (modelTree_->currentIndex().siblingAtColumn(0) == index)
+  {
+    showEntity(index.data(Qt::UserRole).toInt());
+  }
+  else
+  {
+    modelTree_->setCurrentIndex(index);
+  }
+  modelTree_->scrollTo(index);
 }
 
 void MainWindow::appendLog(const QString& message)

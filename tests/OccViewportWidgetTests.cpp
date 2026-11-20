@@ -63,7 +63,7 @@ public:
     cceda::domain::MeshElementId) override { return false; }
   void fitAll() override {}
   void setIsometric() override {}
-  void highlight(std::string_view) override {}
+  void highlight(cceda::domain::GeometryRevision, std::string_view) override {}
   void startRotation(int, int) override {}
   void rotate(int, int) override {}
   void pan(int, int) override {}

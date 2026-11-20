@@ -58,7 +58,7 @@ public:
     domain::MeshElementId elementId) = 0;
   virtual void fitAll() = 0;
   virtual void setIsometric() = 0;
-  virtual void highlight(std::string_view geometryId) = 0;
+  virtual void highlight(domain::GeometryRevision revision, std::string_view geometryId) = 0;
 
   virtual void startRotation(int x, int y) = 0;
   virtual void rotate(int x, int y) = 0;

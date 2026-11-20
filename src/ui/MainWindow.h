@@ -27,11 +27,13 @@ class QTreeView;
 namespace cceda::geometry
 {
 class IGeometryService;
+class IGeometryValidationService;
 }
 
 namespace cceda::ui
 {
 class OccViewportWidget;
+class GeometryValidationPanel;
 class MeshingTaskPanel;
 class QualityInspectionPanel;
 
@@ -41,6 +43,7 @@ public:
   MainWindow(std::shared_ptr<geometry::IGeometryService> geometryService,
              std::shared_ptr<geometry::IProjectGeometryStorage> geometryStorage,
              std::shared_ptr<geometry::IGeometrySnapshotService> snapshotService,
+             std::shared_ptr<const geometry::IGeometryValidationService> validationService,
              std::shared_ptr<visualization::IViewportController> viewportController,
              application::MeshingRuntimeConfiguration meshingConfiguration,
              std::shared_ptr<application::IMeshExporter> meshExporter,
@@ -56,7 +59,7 @@ protected:
 
 private:
   void createActions();
-  void createDocks();
+  void createDocks(std::shared_ptr<const geometry::IGeometryValidationService> validationService);
   void openStepDialog();
   void startStepImport(const QString& path);
   void openProjectDialog();
@@ -93,6 +96,7 @@ private:
   void finishMeshingTask();
   [[nodiscard]] bool hasMeshableGeometry() const;
   void showEntity(int entityIndex);
+  void locateSolid(domain::GeometryRevision revision, const std::string& targetId);
   void appendLog(const QString& message);
 
   std::shared_ptr<geometry::IGeometryService> geometryService_;
@@ -113,7 +117,7 @@ private:
   MeshingTaskPanel* meshingPanel_ = nullptr;
   QualityInspectionPanel* qualityPanel_ = nullptr;
   QTabWidget* outputTabs_ = nullptr;
-  QTableWidget* issues_ = nullptr;
+  GeometryValidationPanel* geometryValidationPanel_ = nullptr;
   QPlainTextEdit* log_ = nullptr;
   QProgressDialog* importProgress_ = nullptr;
   QAction* generateMeshAction_ = nullptr;

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "GeometryValidationPanel.h"
 #include "MeshingTaskPanel.h"
 #include "QualityInspectionPanel.h"
 
@@ -271,7 +272,6 @@ void MainWindow::displayProjectGeometry()
   qualityPanel_->clearQuality();
   meshIssueElementIds_.clear();
   properties_->setRowCount(0);
-  issues_->setRowCount(0);
   populateModel(document_);
   {
     const QSignalBlocker blocker(meshSurfaceAction_);
@@ -279,6 +279,8 @@ void MainWindow::displayProjectGeometry()
   }
   meshSurfaceAction_->setEnabled(false);
   viewportController_->displayCurrentGeometry();
+  geometryValidationPanel_->checkGeometry(document_.revision);
+  outputTabs_->setCurrentWidget(geometryValidationPanel_);
   const bool meshable = hasMeshableGeometry();
   meshingPanel_->setGeometryAvailable(meshable);
   meshingPanel_->resetTaskResult();

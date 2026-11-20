@@ -173,6 +173,7 @@ target_link_libraries(cceda_platform_windows PUBLIC cceda_application)
 add_library(cceda_geometry_occ STATIC
     src/geometry/OccGeometryRepository.cpp
     src/geometry/OccGeometryService.cpp
+    src/geometry/OccGeometryValidationService.cpp
     src/geometry/OccGeometrySnapshotService.cpp)
 target_include_directories(cceda_geometry_occ PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_geometry_occ
@@ -205,6 +206,8 @@ set_target_properties(cceda_gmsh_worker PROPERTIES
     DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(cceda_ui_widgets STATIC
+    src/ui/GeometryValidationPanel.cpp
+    src/ui/GeometryValidationPanel.h
     src/ui/MeshingTaskPanel.cpp
     src/ui/MeshingTaskPanelPresentation.cpp
     src/ui/MeshingTaskPanel.h
@@ -215,7 +218,8 @@ add_library(cceda_ui_widgets STATIC
 target_include_directories(cceda_ui_widgets
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(cceda_ui_widgets
-    PUBLIC Qt6::Widgets cceda_application)
+    PUBLIC Qt6::Widgets cceda_application
+    PRIVATE Qt6::Concurrent)
 set_property(TARGET cceda_ui_widgets
     PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
@@ -300,6 +304,14 @@ set_target_properties(
     FOLDER "Libraries")
 
 if(BUILD_TESTING)
+    add_executable(cceda_geometry_validation_panel_tests
+        tests/GeometryValidationPanelTests.cpp)
+    target_link_libraries(cceda_geometry_validation_panel_tests PRIVATE cceda_ui_widgets)
+    add_test(NAME ui.geometry_validation_panel COMMAND cceda_geometry_validation_panel_tests)
+    set_tests_properties(ui.geometry_validation_panel PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${CCEDA_QT_ROOT}/plugins"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin")
+
     add_executable(cceda_occ_mesh_triangulation_tests
         tests/OccMeshTriangulationTests.cpp)
     target_link_libraries(cceda_occ_mesh_triangulation_tests PRIVATE
@@ -612,6 +624,14 @@ if(BUILD_TESTING)
                 "D:/Projects/OpenCASCADE-8.0.0/install/data/step/screw.step")
     set_tests_properties(geometry.meshing_snapshot PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${OpenCASCADE_BINARY_DIR}")
+
+    add_executable(cceda_geometry_validation_tests tests/GeometryValidationTests.cpp)
+    target_link_libraries(cceda_geometry_validation_tests PRIVATE
+        cceda_geometry_occ TKPrim TKBRep)
+    set_property(TARGET cceda_geometry_validation_tests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+    add_test(NAME geometry.solid_validation COMMAND cceda_geometry_validation_tests)
+    set_tests_properties(geometry.solid_validation PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CCEDA_QT_ROOT}/bin;PATH=path_list_prepend:${OpenCASCADE_BINARY_DIR}")
     set_target_properties(
         cceda_domain_tests
         cceda_mesh_model_tests
@@ -626,6 +646,7 @@ if(BUILD_TESTING)
         cceda_geometry_map_tests
         cceda_geometry_import_tests
         cceda_geometry_snapshot_tests
+        cceda_geometry_validation_tests
         PROPERTIES
         FOLDER "Tests")
 endif()
